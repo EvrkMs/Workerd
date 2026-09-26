@@ -1,15 +1,35 @@
 // API платформы в формате Cloudflare API (/client/v4) — ровно то подмножество,
-// которое нужно `wravler deploy` / `wravler delete`. Код воркеров хранится в реестре (DO).
+// которое нужно `wravler deploy` / `wravler delete` / `wravler tail`.
+// Код воркеров хранится в реестре (DO), живые логи идут через TailHub (DO).
 import type { ModuleType, UploadedModule, WorkerMeta } from "./registry";
 import { Registry } from "./registry";
+import { TailHub, serializeEvent, workerFromEvent } from "./tail";
 import { RESERVED_NAMES, isValidWorkerName } from "./names";
 
-export { Registry };
+export { Registry, TailHub };
 
 interface Env {
   API_TOKEN?: string;
   ROOT_DOMAIN: string;
   REGISTRY: DurableObjectNamespace<Registry>;
+  TAILS: DurableObjectNamespace<TailHub>;
+}
+
+function tailHub(env: Env, name: string) {
+  return env.TAILS.get(env.TAILS.idFromName(name));
+}
+
+// Кэш «у воркера есть слушатели tail», чтобы не ходить в TailHub на каждый запрос.
+// Новая сессия начинает получать события не позже чем через LISTENERS_TTL_MS.
+const LISTENERS_TTL_MS = 2000;
+const listeners = new Map<string, { has: boolean; until: number }>();
+
+async function hasListeners(env: Env, name: string): Promise<boolean> {
+  const cached = listeners.get(name);
+  if (cached && cached.until > Date.now()) return cached.has;
+  const has = await tailHub(env, name).hasListeners();
+  listeners.set(name, { has, until: Date.now() + LISTENERS_TTL_MS });
+  return has;
 }
 
 function ok(result: unknown): Response {
@@ -98,11 +118,20 @@ async function parseUpload(request: Request): Promise<Parsed> {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // WebSocket wrangler tail: /tail/<воркер>/<сессия>. Токен wrangler сюда не шлёт,
+    // секрет — сам id сессии, который выдаётся только по токену (POST .../tails).
+    const tailSocket = url.pathname.match(/^\/tail\/([^/]+)\/([0-9a-f-]{36})$/);
+    if (tailSocket) {
+      const [, name, id] = tailSocket;
+      // только заголовки: у upgrade-запроса нет тела, а проброс потока даёт ошибку после 101
+      return tailHub(env, name).fetch(`http://tail/connect?id=${id}`, { headers: request.headers });
+    }
+
     if (!authorized(request, env)) {
       return fail(401, 10000, "Authentication error: неверный или отсутствующий токен");
     }
-
-    const url = new URL(request.url);
 
     // wrangler delete после удаления ищет KV от старого Workers Sites — KV у нас нет
     if (request.method === "GET" && /^\/client\/v4\/accounts\/[^/]+\/storage\/kv\/namespaces$/.test(url.pathname)) {
@@ -164,11 +193,46 @@ export default {
       });
     }
 
+    // wrangler tail: создать сессию → WebSocket-адрес, удалить сессию при выходе
+    if (method === "POST" && sub === "tails") {
+      if ((await registry(env).activeVersion(name)) === null) {
+        return fail(404, 10007, `воркер ${name} не найден`);
+      }
+      const session = await tailHub(env, name).createSession();
+      listeners.delete(name);
+      return ok({
+        id: session.id,
+        url: `wss://api.${env.ROOT_DOMAIN}/tail/${name}/${session.id}`,
+        expires_at: session.expiresAt,
+      });
+    }
+    const tailSession = sub.match(/^tails\/([0-9a-f-]{36})$/);
+    if (method === "DELETE" && tailSession) {
+      await tailHub(env, name).deleteSession(tailSession[1]);
+      return ok(null);
+    }
+    if (method === "GET" && sub === "tails") return ok([]);
+
     if (method === "GET" && sub === "secrets") return ok([]);
     if (method === "GET" && sub === "deployments") return ok({ deployments: [] });
     if (sub === "settings") return ok({});
     if (sub === "subdomain") return ok({ enabled: true, previews_enabled: false });
 
     return fail(404, 7003, `unknown route ${method} ${url.pathname}`);
+  },
+
+  // События загруженных воркеров (gateway передаёт api в `tails` загрузчика)
+  async tail(events, env) {
+    const byWorker = new Map<string, string[]>();
+    for (const event of events) {
+      const name = workerFromEvent(event, env.ROOT_DOMAIN);
+      if (!name) continue;
+      const list = byWorker.get(name) ?? [];
+      list.push(serializeEvent(event));
+      byWorker.set(name, list);
+    }
+    for (const [name, messages] of byWorker) {
+      if (await hasListeners(env, name)) await tailHub(env, name).publish(messages);
+    }
   },
 } satisfies ExportedHandler<Env>;

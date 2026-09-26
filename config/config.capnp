@@ -40,11 +40,13 @@ const apiWorker :Workerd.Worker = (
   compatibilityDate = "2026-09-01",
   durableObjectNamespaces = [
     (className = "Registry", uniqueKey = "platform-Registry", enableSql = true),
+    (className = "TailHub", uniqueKey = "platform-TailHub", enableSql = true),
   ],
   durableObjectStorage = (localDisk = "storage"),
   bindings = [
     (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
     (name = "API_TOKEN", fromEnvironment = "WRAVLER_TOKEN"),
     (name = "REGISTRY", durableObjectNamespace = "Registry"),
+    (name = "TAILS", durableObjectNamespace = "TailHub"),
   ],
 );

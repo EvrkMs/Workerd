@@ -2,6 +2,8 @@
 //   /       — страница с версией и сообщением из [vars]
 //   /json   — то же в JSON
 //   /echo   — метод, путь и заголовки запроса
+//   /error  — бросает исключение (видно в `wravler tail`)
+// Каждый запрос пишет строку в console.log — смотри её через `wravler tail`.
 
 interface Env {
   VERSION: string;
@@ -48,7 +50,7 @@ function page(data: ReturnType<typeof info>): string {
     <dt>Изолят</dt><dd><code>${data.isolate}</code> с ${data.isolateSince}</dd>
     <dt>Сейчас</dt><dd>${data.now}</dd>
   </dl>
-  <p>Ещё: <a href="/json"><code>/json</code></a>, <a href="/echo"><code>/echo</code></a></p>
+  <p>Ещё: <a href="/json"><code>/json</code></a>, <a href="/echo"><code>/echo</code></a>, <a href="/error"><code>/error</code></a></p>
 </body>
 </html>`;
 }
@@ -60,6 +62,11 @@ function escape(s: string): string {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    console.log(`запрос ${request.method} ${url.pathname}, версия ${env.VERSION}`);
+
+    if (url.pathname === "/error") {
+      throw new Error("тестовое исключение из /error");
+    }
 
     if (url.pathname === "/json") {
       return Response.json(info(request, env));

@@ -49,7 +49,11 @@ export default {
     try {
       const worker = env.LOADER.get(`${name}@${version}`, async () => {
         const code: VersionCode = await registry(env).code(version);
-        return code as WorkerLoaderWorkerCode;
+        return {
+          ...(code as WorkerLoaderWorkerCode),
+          // события воркера (console.*, исключения, запросы) → api.tail() → wravler tail
+          tails: [env.API],
+        };
       });
       return await worker.getEntrypoint().fetch(request);
     } catch (e) {
