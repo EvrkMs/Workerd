@@ -29,10 +29,10 @@ workers/    воркеры, каждый со своим package.json (сейч�
 
 Контейнер подключён к внешней сети `caddy` (имя меняется через `CADDY_NETWORK`). Лейблы для caddy-docker-proxy отдают на него `workers.ava-kk.ru` и `*.workers.ava-kk.ru`.
 
-Что нужно для wildcard:
-- DNS-запись `*.workers.ava-kk.ru` в Cloudflare;
-- Caddy, собранный с модулем `caddy-dns/cloudflare`;
-- `CLOUDFLARE_API_TOKEN` в окружении Caddy, с правом Zone.DNS:Edit на `ava-kk.ru`.
+Wildcard-сертификат Caddy получает через DNS-01. Эта проверка уже включена в Caddy глобально (`acme_dns cloudflare {env.CF_API_TOKEN}`), DNS-запись `*.workers` есть в Cloudflare.
+**Свой `caddy.tls.*` в лейблы не добавлять:** если блок невалидный, Caddy отклоняет весь новый конфиг, и перестают применяться изменения для всех сайтов.
+
+На хост порты не публикуются: Caddy (сервис Swarm, может крутиться на другом узле) ходит к контейнеру через overlay-сеть `caddy`.
 
 Для локального запуска сеть создаётся один раз: `docker network create caddy`.
 
