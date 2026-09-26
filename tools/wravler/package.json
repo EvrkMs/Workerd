@@ -1,0 +1,12 @@
+{
+  "name": "wravler",
+  "private": true,
+  "type": "module",
+  "description": "wrangler, направленный на свою платформу workerd",
+  "bin": {
+    "wravler": "bin/wravler.js"
+  },
+  "dependencies": {
+    "wrangler": "4.141.0"
+  }
+}

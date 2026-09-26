@@ -5,6 +5,7 @@ const config :Workerd.Config = (
     (name = "gateway", worker = .gatewayWorker),
     (name = "hello", worker = .helloWorker),
     (name = "counter", worker = .counterWorker),
+    (name = "api", worker = .apiWorker),
 
     # Хранилище Durable Objects: volume workerd_data
     (name = "do-storage", disk = (path = "/data", writable = true)),
@@ -24,7 +25,16 @@ const gatewayWorker :Workerd.Worker = (
     (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
     (name = "hello", service = "hello"),
     (name = "counter", service = "counter"),
+    (name = "api", service = "api"),
   ],
+);
+
+# Заглушка Cloudflare API для wravler: api.workers.ava-kk.ru/client/v4
+const apiWorker :Workerd.Worker = (
+  modules = [
+    (name = "index.js", esModule = embed "api/index.js"),
+  ],
+  compatibilityDate = "2026-09-01",
 );
 
 const helloWorker :Workerd.Worker = (
