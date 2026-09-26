@@ -1,0 +1,9 @@
+# Тестовый воркер для проверки деплоя: wravler deploy → https://test.workers.ava-kk.ru
+# Поменяй VERSION или MESSAGE, задеплой ещё раз — страница обновится через ~1 секунду.
+name = "test"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[vars]
+VERSION = "1"
+MESSAGE = "Привет с платформы workerd!"
