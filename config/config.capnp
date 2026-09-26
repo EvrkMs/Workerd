@@ -29,11 +29,18 @@ const gatewayWorker :Workerd.Worker = (
   ],
   compatibilityDate = "2026-09-01",
   compatibilityFlags = ["experimental"],
+  # Host: один DO на каждый объект Durable Object пользовательских воркеров;
+  # класс пользователя живёт внутри как facet со своей SQLite (workers/gateway/src/durable.ts)
+  durableObjectNamespaces = [
+    (className = "Host", uniqueKey = "platform-Host", enableSql = true),
+  ],
+  durableObjectStorage = (localDisk = "storage"),
   bindings = [
     (name = "ROOT_DOMAIN", fromEnvironment = "ROOT_DOMAIN"),  # из deploy/.env
     (name = "API", service = "api"),
     (name = "LOADER", workerLoader = ()),
     (name = "REGISTRY", durableObjectNamespace = (className = "Registry", serviceName = "api")),
+    (name = "HOST", durableObjectNamespace = "Host"),
   ],
 );
 

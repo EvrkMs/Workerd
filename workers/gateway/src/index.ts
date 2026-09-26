@@ -1,15 +1,13 @@
-// Точка входа платформы: <имя>.workers.ava-kk.ru → воркер из реестра,
+// Точка входа платформы: <имя>.<ROOT_DOMAIN> → воркер из реестра,
 // загруженный на лету через Worker Loader. Новая версия = новый id загрузчика,
 // поэтому деплой не требует перезапуска workerd и не трогает остальные воркеры.
-import type { Registry, VersionCode } from "../../api/src/registry";
 import { isValidWorkerName } from "../../api/src/names";
+import { DoNamespace, Host } from "./durable";
+import type { Env, PlatformExports } from "./loader";
+import { loadWorker, registry } from "./loader";
 
-interface Env {
-  ROOT_DOMAIN: string;
-  API: Fetcher;
-  LOADER: WorkerLoader;
-  REGISTRY: DurableObjectNamespace<Registry>;
-}
+// ctx.exports и Durable Object namespace берут классы из главного модуля
+export { DoNamespace, Host };
 
 // Кэш «имя → активная версия», чтобы не ходить в реестр на каждый запрос.
 // После деплоя новая версия начинает отвечать не позже чем через VERSION_TTL_MS.
@@ -24,12 +22,8 @@ async function activeVersion(env: Env, name: string): Promise<number | null> {
   return version;
 }
 
-function registry(env: Env) {
-  return env.REGISTRY.get(env.REGISTRY.idFromName("main"));
-}
-
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const host = new URL(request.url).hostname;
     const suffix = `.${env.ROOT_DOMAIN}`;
 
@@ -48,15 +42,8 @@ export default {
     }
 
     try {
-      const worker = env.LOADER.get(`${name}@${version}`, async () => {
-        const code: VersionCode = await registry(env).code(version);
-        return {
-          ...(code as WorkerLoaderWorkerCode),
-          // события воркера (console.*, исключения, запросы) → api.tail() → wravler tail
-          tails: [env.API],
-        };
-      });
-      return await worker.getEntrypoint().fetch(request);
+      const exports = (ctx as unknown as { exports: PlatformExports }).exports;
+      return await loadWorker(env, exports, name, version).getEntrypoint().fetch(request);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       console.error(`worker ${name}@${version} failed: ${message}`);

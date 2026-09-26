@@ -1,7 +1,7 @@
 // API платформы в формате Cloudflare API (/client/v4) — ровно то подмножество,
 // которое нужно `wravler deploy` / `wravler delete` / `wravler tail`.
 // Код воркеров хранится в реестре (DO), живые логи идут через TailHub (DO).
-import type { ModuleType, UploadedModule, WorkerMeta } from "./registry";
+import type { DurableObjectBinding, ModuleType, UploadedModule, WorkerMeta } from "./registry";
 import { Registry } from "./registry";
 import { TailHub, serializeEvent, workerFromEvent } from "./tail";
 import { handlePanel } from "./panel";
@@ -58,8 +58,17 @@ interface UploadMetadata {
   body_part?: string;
   compatibility_date?: string;
   compatibility_flags?: string[];
-  bindings?: { name: string; type: string; text?: string; json?: unknown }[];
+  bindings?: { name: string; type: string; text?: string; json?: unknown; class_name?: string; script_name?: string }[];
+  migrations?: {
+    steps?: {
+      renamed_classes?: unknown[];
+      transferred_classes?: unknown[];
+    }[];
+  };
 }
+
+/** Модуль-прослойка платформы, которую gateway подмешивает в код воркера. */
+const PLATFORM_MODULE = "__platform.js";
 
 const MODULE_TYPES: Record<string, ModuleType> = {
   "application/javascript+module": "js",
@@ -73,7 +82,7 @@ const MODULE_TYPES: Record<string, ModuleType> = {
 
 type Parsed = { meta: WorkerMeta; modules: UploadedModule[] } | { error: string };
 
-async function parseUpload(request: Request): Promise<Parsed> {
+async function parseUpload(request: Request, workerName: string): Promise<Parsed> {
   const form = await request.formData();
   const rawMeta = form.get("metadata");
   if (typeof rawMeta !== "string") return { error: "в загрузке нет metadata" };
@@ -84,15 +93,33 @@ async function parseUpload(request: Request): Promise<Parsed> {
   }
 
   const vars: Record<string, unknown> = {};
+  const durableObjects: DurableObjectBinding[] = [];
   for (const b of metadata.bindings ?? []) {
     if (b.type === "plain_text") vars[b.name] = b.text;
     else if (b.type === "json") vars[b.name] = b.json;
-    else return { error: `биндинг ${b.name} (${b.type}) платформа пока не поддерживает` };
+    else if (b.type === "durable_object_namespace") {
+      if (b.script_name && b.script_name !== workerName) {
+        return { error: `биндинг ${b.name}: DO другого воркера (${b.script_name}) платформа пока не поддерживает` };
+      }
+      if (!b.class_name || !/^[A-Za-z_$][\w$]*$/.test(b.class_name)) {
+        return { error: `биндинг ${b.name}: некорректное имя класса DO` };
+      }
+      durableObjects.push({ binding: b.name, className: b.class_name });
+    } else return { error: `биндинг ${b.name} (${b.type}) платформа пока не поддерживает` };
+  }
+
+  // Данные DO привязаны к имени класса, поэтому переименование/перенос классов
+  // потеряли бы данные — не принимаем, пока это не реализовано явно.
+  for (const step of metadata.migrations?.steps ?? []) {
+    if (step.renamed_classes?.length || step.transferred_classes?.length) {
+      return { error: "миграции renamed_classes/transferred_classes платформа пока не поддерживает" };
+    }
   }
 
   const modules: UploadedModule[] = [];
   for (const [name, value] of form.entries()) {
     if (name === "metadata" || typeof value === "string") continue;
+    if (name === PLATFORM_MODULE) return { error: `имя модуля ${PLATFORM_MODULE} занято платформой` };
     const contentType = value.type.split(";")[0].trim();
     if (contentType === "application/source-map") continue;
     const type = MODULE_TYPES[contentType];
@@ -110,6 +137,7 @@ async function parseUpload(request: Request): Promise<Parsed> {
       compatibilityDate: metadata.compatibility_date ?? "2026-09-01",
       compatibilityFlags: metadata.compatibility_flags ?? [],
       vars,
+      durableObjects,
     },
     modules,
   };
@@ -172,7 +200,7 @@ export default {
 
     // Загрузка кода: PUT /scripts/:name
     if (method === "PUT" && rest.startsWith("scripts/") && sub === "") {
-      const parsed = await parseUpload(request);
+      const parsed = await parseUpload(request, name);
       if ("error" in parsed) return fail(400, 10021, parsed.error);
       const version = await registry(env).deploy(name, parsed.meta, parsed.modules);
       // wrangler показывает deployment_id как UUID без дефисов → кодируем в него номер версии

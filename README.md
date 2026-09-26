@@ -29,7 +29,9 @@ wravler tail ──WebSocket──> TailHub (DO на воркер) <────
 | `wravler deploy`, `wravler delete` | ✅ |
 | Веб-панель: список воркеров, удаление | ✅ `panel.<ROOT_DOMAIN>` |
 | `wravler tail` (логи, исключения, запросы) | ✅ фильтры (`--status`, `--method`…) пока игнорируются |
-| Durable Objects, service bindings, KV, D1, R2, секреты | ❌ деплой отклоняется с понятной ошибкой |
+| Durable Objects своего воркера (SQLite и KV-API storage, RPC-методы, `fetch`) | ✅ см. раздел «Durable Objects» |
+| DO другого воркера (`script_name`), миграции `renamed_classes` / `transferred_classes` | ❌ деплой отклоняется |
+| Service bindings, KV, D1, R2, секреты | ❌ деплой отклоняется с понятной ошибкой |
 
 ## Структура
 
@@ -46,7 +48,7 @@ tools/
 examples/    воркеры для проверки, деплоятся через wravler
   test/      тестовый воркер: страница с версией из [vars], /json, /echo, /error
   hello/
-  counter/   с DO: пока отклоняется, цель следующего этапа
+  counter/   Durable Object на SQLite: счётчик обращений по пути
 ```
 
 Образы (`engine/Dockerfile`, контекст сборки — корень репозитория):
@@ -77,6 +79,30 @@ wravler delete --name hello
 ```
 
 wrangler в конце печатает адрес вида `hello.ava.workers.dev`: этот формат зашит в нём. Настоящий адрес `wravler` печатает строкой ниже.
+
+## Durable Objects
+
+В `wrangler.toml` всё как в Cloudflare:
+
+```toml
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "Counter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Counter"]
+```
+
+В коде тоже: `env.COUNTER.getByName("x").hit()`, `env.COUNTER.get(env.COUNTER.idFromName("x"))`, `stub.fetch(request)`, `this.ctx.storage.sql` / `.get` / `.put`.
+
+Как устроено (`workers/gateway/src/durable.ts`, `shim.ts`):
+- Каждый объект (`<воркер>/<класс>/<id>`) — это отдельный **Host-DO платформы**. Внутри него класс пользователя запущен как **facet** со своей изолированной SQLite.
+- В код воркера платформа подмешивает главным модулем прослойку `__platform.js`. Она реэкспортирует код пользователя и превращает служебный биндинг в `env.COUNTER` с API как у `DurableObjectNamespace`. Stub объекта — это JS `Proxy`: `stub.method(...args)` уходит в Host, тот вызывает метод у facet. Stub facet'а нельзя передать через RPC напрямую, поэтому вызовы проксируются.
+- При деплое новой версии Host перезапускает facet с новым классом, **данные остаются**. Проверено: новая версия и перезапуск контейнера.
+- Данные лежат в `/data/platform-Host/` и попадают в бэкап. При удалении воркера они **не удаляются**: если снова задеплоить воркер с тем же именем, он найдёт свои данные.
+
+Отличия от Cloudflare: id объекта — это hex от имени, а не 64-символьный хэш. Вызовы через stub проксируются, поэтому аргументы и результаты должны быть сериализуемыми (как у RPC). Цепочки вида `stub.a.b()` не поддерживаются. Alarms и WebSocket Hibernation внутри facet не проверялись.
 
 ## Панель
 

@@ -10,11 +10,19 @@ export interface UploadedModule {
   content: ArrayBuffer;
 }
 
+/** Биндинг Durable Object своего же воркера: env[binding] → класс className. */
+export interface DurableObjectBinding {
+  binding: string;
+  className: string;
+}
+
 export interface WorkerMeta {
   mainModule: string;
   compatibilityDate: string;
   compatibilityFlags: string[];
   vars: Record<string, unknown>;
+  /** Нет в версиях, загруженных до поддержки DO. */
+  durableObjects?: DurableObjectBinding[];
 }
 
 export interface WorkerSummary {
@@ -33,6 +41,7 @@ export interface VersionCode {
   mainModule: string;
   modules: Record<string, { js: string } | { cjs: string } | { text: string } | { json: unknown } | { data: ArrayBuffer } | { wasm: ArrayBuffer }>;
   env: Record<string, unknown>;
+  durableObjects: DurableObjectBinding[];
 }
 
 export class Registry extends DurableObject<object> {
@@ -137,6 +146,7 @@ export class Registry extends DurableObject<object> {
       mainModule: meta.mainModule,
       modules,
       env: meta.vars,
+      durableObjects: meta.durableObjects ?? [],
     };
   }
 

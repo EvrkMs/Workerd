@@ -1,5 +1,5 @@
-# Пример с Durable Object. Платформа пока DO не поддерживает — деплой будет отклонён
-# с понятной ошибкой. Оставлен как цель для следующего этапа (DO через facets).
+# Пример с Durable Object (SQLite): wravler deploy → https://counter.<ROOT_DOMAIN>/<путь>
+# Счётчик обращений по пути; данные переживают новые версии и перезапуск платформы.
 name = "counter"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
