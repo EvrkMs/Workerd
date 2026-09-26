@@ -8,14 +8,16 @@ services:
     command: ["--experimental"]  # Worker Loader пока экспериментальный
     environment:
       # Токен API для wravler. deploy.sh берёт его из ~/.config/wravler/token.
-      # Пустой токен = API закрыт полностью (поэтому `up` мимо deploy.sh безопасен, но API не работает).
+      # Пустой токен = API закрыт полностью: `docker compose up` мимо deploy.sh
+      # пересоздаст контейнер без токена, и wravler начнёт получать 401. Поднимать только через deploy.sh.
       WRAVLER_TOKEN: ${WRAVLER_TOKEN:-}
-    # Порты на хост не публикуем: Caddy ходит к контейнеру через overlay-сеть caddy
+    # Порты на хост не публикуем. Сеть caddy_workerd общая только с caddy-server,
+    # поэтому соседи из сети caddy (соседние сервисы и контроллер Caddy) workerd не видят.
     volumes:
       - workerd_app:/app    # config.capnp + код платформы (кладёт deploy.sh)
       - workerd_data:/data  # реестр воркеров и данные Durable Objects
     networks:
-      - caddy
+      - caddy_workerd
     labels:
       # caddy-docker-proxy. Wildcard выдаётся через DNS-01 — это уже настроено
       # глобально в Caddy (acme_dns cloudflare {env.CF_API_TOKEN}), свой tls-блок
@@ -28,6 +30,6 @@ volumes:
   workerd_data:
 
 networks:
-  caddy:
+  caddy_workerd:
     external: true
-    name: caddy
+    name: caddy_workerd
