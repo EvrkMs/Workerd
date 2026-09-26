@@ -6,11 +6,25 @@ services:
     image: workerd:local
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"  # только для отладки на хосте, снаружи — через Caddy
     volumes:
       - workerd_app:/app    # config.capnp + собранные воркеры (кладёт deploy.sh)
       - workerd_data:/data  # sqlite Durable Objects
+    networks:
+      - caddy
+    labels:
+      # caddy-docker-proxy. Wildcard-сертификат выдаётся только через DNS-01,
+      # поэтому Caddy должен быть собран с модулем caddy-dns/cloudflare
+      # и иметь токен CLOUDFLARE_API_TOKEN (права Zone.DNS:Edit на ava-kk.ru).
+      caddy: "workers.ava-kk.ru, *.workers.ava-kk.ru"
+      caddy.tls.dns: "cloudflare {env.CLOUDFLARE_API_TOKEN}"
+      caddy.reverse_proxy: "{{upstreams 8080}}"
 
 volumes:
   workerd_app:
   workerd_data:
+
+networks:
+  caddy:
+    external: true
+    name: ${CADDY_NETWORK:-caddy}

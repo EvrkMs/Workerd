@@ -25,6 +25,17 @@ workers/    воркеры, каждый со своим package.json (сейч�
 
 Рабочий контекст — `manager`. Bind mount с относительным путём (`./x:/y`) там не работает, потому что демон удалённый. Можно использовать только абсолютный путь на сервере или named volume.
 
+## Caddy
+
+Контейнер подключён к внешней сети `caddy` (имя меняется через `CADDY_NETWORK`). Лейблы для caddy-docker-proxy отдают на него `workers.ava-kk.ru` и `*.workers.ava-kk.ru`.
+
+Что нужно для wildcard:
+- DNS-запись `*.workers.ava-kk.ru` в Cloudflare;
+- Caddy, собранный с модулем `caddy-dns/cloudflare`;
+- `CLOUDFLARE_API_TOKEN` в окружении Caddy, с правом Zone.DNS:Edit на `ava-kk.ru`.
+
+Для локального запуска сеть создаётся один раз: `docker network create caddy`.
+
 ## Команды
 
 Все команды выполняются в WSL-дистрибутиве `claude`:
