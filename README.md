@@ -46,6 +46,7 @@ workers/     воркеры платформы
   gateway/   <имя>.<ROOT_DOMAIN> → статика или воркер из реестра через Worker Loader
              src/loader.ts — загрузка, shim.ts — прослойка env, durable.ts — DO, assets.ts — статика
   api/       API для wravler, реестр (src/registry.ts), статика (src/assets.ts), панель, tail
+panel/       веб-панель: React + Vite, собирается в образ платформы
 tools/
   wravler/   wrangler 4.141.0 с адресом и токеном нашей платформы
 examples/    воркеры для проверки, деплоятся через wravler
