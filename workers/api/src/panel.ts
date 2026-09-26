@@ -96,6 +96,15 @@ async function handleApi(request: Request, url: URL, env: PanelEnv): Promise<Res
     const ok = typeof body.version === "number" && (await registry.setActive(name, body.version));
     return ok ? json({ ok: true }) : json({ error: "Версия не найдена" }, 404);
   }
+  if (method === "POST" && sub === "/secrets") {
+    const body = (await request.json().catch(() => ({}))) as { name?: string; value?: string };
+    if (!body.name || typeof body.value !== "string") return json({ error: "нужны имя и значение" }, 400);
+    return changeSecrets(registry, name, { [body.name]: body.value });
+  }
+  if (method === "DELETE" && sub === "/secrets") {
+    const key = url.searchParams.get("name") ?? "";
+    return changeSecrets(registry, name, { [key]: null });
+  }
   if (method === "POST" && sub === "/tail") {
     if ((await registry.activeVersion(name)) === null) return json({ error: "Воркер не найден" }, 404);
     const session = await env.TAILS.get(env.TAILS.idFromName(name)).createSession();
@@ -108,6 +117,19 @@ async function handleApi(request: Request, url: URL, env: PanelEnv): Promise<Res
   }
 
   return json({ error: "not found" }, 404);
+}
+
+async function changeSecrets(
+  registry: DurableObjectStub<Registry>,
+  name: string,
+  changes: Record<string, string | null>,
+): Promise<Response> {
+  try {
+    const version = await registry.changeSecrets(name, changes);
+    return version === null ? json({ error: "Воркер не найден" }, 404) : json({ ok: true, version });
+  } catch (e) {
+    return json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
 }
 
 // --- приложение ---------------------------------------------------------------------

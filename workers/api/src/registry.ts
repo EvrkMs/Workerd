@@ -45,7 +45,9 @@ export interface WorkerMeta {
   /** Нет в версиях, загруженных до поддержки DO. */
   durableObjects?: DurableObjectBinding[];
   assets?: VersionAssets;
-  /** wrangler deploy --message */
+  /** Секреты: имя → значение. Наружу отдаются только имена. Наследуются при деплое. */
+  secrets?: Record<string, string>;
+  /** wrangler deploy --message или описание служебной версии («Секрет X обновлён») */
   message?: string;
 }
 
@@ -60,6 +62,7 @@ export interface WorkerSummary {
   assetFiles: number;
   durableObjects: number;
   vars: number;
+  secrets: number;
 }
 
 export interface VersionSummary {
@@ -77,6 +80,8 @@ export interface WorkerDetail extends WorkerSummary {
   compatibilityDate: string;
   compatibilityFlags: string[];
   varsList: { name: string; value: string }[];
+  /** Только имена — значения секретов из реестра не выходят. */
+  secretsList: string[];
   durableObjectsList: DurableObjectBinding[];
   assets: { files: number; binding: string | null; config: AssetConfig } | null;
   modules: { name: string; type: ModuleType; size: number }[];
@@ -136,8 +141,12 @@ function toSummary(r: SummaryRow): WorkerSummary {
     assetFiles: meta.assets ? Object.keys(meta.assets.manifest).length : 0,
     durableObjects: meta.durableObjects?.length ?? 0,
     vars: Object.keys(meta.vars).length,
+    secrets: Object.keys(meta.secrets ?? {}).length,
   };
 }
+
+/** Имя секрета — как у переменной окружения; "__…" занято платформой. */
+export const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export class Registry extends DurableObject<object> {
   private readonly sql: SqlStorage;
@@ -182,9 +191,17 @@ export class Registry extends DurableObject<object> {
     });
   }
 
-  /** Сохраняет новую версию и делает её активной. Возвращает номер версии. */
+  /**
+   * Сохраняет новую версию и делает её активной. Возвращает номер версии.
+   * Секреты наследуются от активной версии (как в Cloudflare); переданные в meta — поверх.
+   */
   deploy(name: string, meta: WorkerMeta, modules: UploadedModule[]): number {
     return this.ctx.storage.transactionSync(() => {
+      const secrets = { ...this.activeMeta(name)?.secrets, ...meta.secrets };
+      const clash = Object.keys(meta.vars).find((v) => v in secrets);
+      if (clash) throw new Error(`имя ${clash} уже занято секретом — переименуй переменную или удали секрет`);
+      meta = { ...meta, secrets };
+
       const now = new Date().toISOString();
       const version = this.sql
         .exec<{ id: number }>(
@@ -213,6 +230,69 @@ export class Registry extends DurableObject<object> {
         now,
         now,
       );
+      return version;
+    });
+  }
+
+  private activeMeta(name: string): WorkerMeta | null {
+    const row = this.sql
+      .exec<{ meta: string }>(
+        "SELECT v.meta FROM workers w JOIN versions v ON v.id = w.active_version WHERE w.name = ?",
+        name,
+      )
+      .toArray()[0];
+    return row ? (JSON.parse(row.meta) as WorkerMeta) : null;
+  }
+
+  // --- секреты ---------------------------------------------------------------------
+
+  /** Имена секретов активной версии; null — воркера нет. */
+  secretNames(name: string): string[] | null {
+    const meta = this.activeMeta(name);
+    return meta ? Object.keys(meta.secrets ?? {}).sort() : null;
+  }
+
+  /**
+   * Меняет секреты: значение — задать, null — удалить. Как в Cloudflare, это новая
+   * версия с тем же кодом, и она сразу становится активной (её можно откатить).
+   * Возвращает номер версии; null — воркера нет.
+   */
+  changeSecrets(name: string, changes: Record<string, string | null>): number | null {
+    return this.ctx.storage.transactionSync(() => {
+      const active = this.activeVersion(name);
+      const meta = this.activeMeta(name);
+      if (active === null || !meta) return null;
+
+      const secrets = { ...meta.secrets };
+      for (const [key, value] of Object.entries(changes)) {
+        if (!SECRET_NAME.test(key) || key.startsWith("__")) throw new Error(`недопустимое имя секрета: ${key}`);
+        if (value !== null && key in meta.vars) throw new Error(`имя ${key} уже занято переменной из [vars]`);
+        if (value === null) delete secrets[key];
+        else secrets[key] = value;
+      }
+
+      const set = Object.entries(changes).filter(([, v]) => v !== null).map(([k]) => k);
+      const removed = Object.entries(changes).filter(([, v]) => v === null).map(([k]) => k);
+      const message = [
+        set.length ? `Секрет ${set.join(", ")} обновлён` : "",
+        removed.length ? `Секрет ${removed.join(", ")} удалён` : "",
+      ].filter(Boolean).join("; ");
+
+      const now = new Date().toISOString();
+      const version = this.sql
+        .exec<{ id: number }>(
+          "INSERT INTO versions (worker, meta, created_at) VALUES (?, ?, ?) RETURNING id",
+          name,
+          JSON.stringify({ ...meta, secrets, message } satisfies WorkerMeta),
+          now,
+        )
+        .one().id;
+      this.sql.exec(
+        "INSERT INTO modules (version_id, name, type, content) SELECT ?, name, type, content FROM modules WHERE version_id = ?",
+        version,
+        active,
+      );
+      this.sql.exec("UPDATE workers SET active_version = ?, updated_at = ? WHERE name = ?", version, now, name);
       return version;
     });
   }
@@ -252,7 +332,7 @@ export class Registry extends DurableObject<object> {
       compatibilityFlags: meta.compatibilityFlags,
       mainModule: meta.mainModule,
       modules,
-      env: meta.vars,
+      env: { ...meta.vars, ...meta.secrets },
       durableObjects: meta.durableObjects ?? [],
       assetsBinding: meta.assets?.binding ?? null,
     };
@@ -364,6 +444,7 @@ export class Registry extends DurableObject<object> {
       mainModule: meta.mainModule,
       compatibilityDate: meta.compatibilityDate,
       compatibilityFlags: meta.compatibilityFlags,
+      secretsList: Object.keys(meta.secrets ?? {}).sort(),
       varsList: Object.entries(meta.vars).map(([name, value]) => ({
         name,
         value: typeof value === "string" ? value : JSON.stringify(value),

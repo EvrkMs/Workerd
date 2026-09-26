@@ -47,7 +47,7 @@ export function Worker({ name, tab, rootDomain }: { name: string; tab: WorkerTab
           <Versions worker={worker.data} versions={versions.data} error={versions.error} onChanged={reload} />
         )}
         {tab === "logs" && <Logs name={name} />}
-        {worker.data && tab === "settings" && <Settings worker={worker.data} />}
+        {worker.data && tab === "settings" && <Settings worker={worker.data} onChanged={reload} />}
         {worker.loading && !worker.data && <div className="skeleton" style={{ height: 160 }} />}
       </main>
     </>
@@ -124,6 +124,7 @@ function Bindings({ worker: w }: { worker: WorkerDetail }) {
         }]
       : []),
     ...w.varsList.map((v) => ({ name: v.name, kind: "Переменная", value: v.value, icon: "key" as const })),
+    ...w.secretsList.map((s) => ({ name: s, kind: "Секрет", value: "••••••••", icon: "key" as const })),
   ];
   if (rows.length === 0) return <Empty>Биндингов нет</Empty>;
   return (
@@ -221,10 +222,96 @@ function Versions({ worker, versions, error, onChanged }: {
 
 // --- Настройки -------------------------------------------------------------------------
 
-function Settings({ worker: w }: { worker: WorkerDetail }) {
+// Переменные ([vars] из wrangler.toml, только просмотр) и секреты (можно добавить/удалить).
+// Изменение секрета — новая версия с тем же кодом, её видно во «Версиях» и можно откатить.
+function VarsAndSecrets({ worker: w, onChanged }: { worker: WorkerDetail; onChanged: () => void }) {
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  async function run(key: string, action: () => Promise<unknown>) {
+    setBusy(key);
+    setError(null);
+    try {
+      await action();
+      onChanged();
+      return true;
+    } catch (e) {
+      setError(e);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const replacing = w.secretsList.includes(name.trim());
+
+  return (
+    <Card title="Переменные и секреты" flush>
+      {w.varsList.length === 0 && w.secretsList.length === 0 ? (
+        <Empty>Нет ни переменных, ни секретов</Empty>
+      ) : (
+        <table className="table">
+          <thead><tr><th>Имя в env</th><th className="hide-sm">Тип</th><th>Значение</th><th /></tr></thead>
+          <tbody>
+            {w.varsList.map((v) => (
+              <tr key={`v:${v.name}`}>
+                <td><code>{v.name}</code></td>
+                <td className="muted hide-sm">Переменная</td>
+                <td className="truncate-cell"><span title={v.value}>{v.value}</span></td>
+                <td />
+              </tr>
+            ))}
+            {w.secretsList.map((s) => (
+              <tr key={`s:${s}`}>
+                <td><code>{s}</code></td>
+                <td className="muted hide-sm">Секрет</td>
+                <td className="muted">••••••••</td>
+                <td className="num">
+                  <button type="button" className="btn-icon" aria-label={`Удалить секрет ${s}`} title="Удалить"
+                    disabled={busy !== null}
+                    onClick={() => confirm(`Удалить секрет ${s}? Будет создана новая версия воркера без него.`) &&
+                      run(s, () => api.deleteSecret(w.name, s))}>
+                    <Icon name="trash" size={14} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <form className="secret-form" onSubmit={async (e) => {
+        e.preventDefault();
+        if (await run("__new", () => api.putSecret(w.name, name.trim(), value))) {
+          setName("");
+          setValue("");
+        }
+      }}>
+        <input aria-label="Имя секрета" placeholder="ИМЯ_СЕКРЕТА" value={name} spellCheck={false}
+          autoComplete="off" onChange={(e) => setName(e.target.value)} required pattern="[A-Za-z_][A-Za-z0-9_]*" />
+        <input aria-label="Значение секрета" placeholder="значение" type="password" value={value}
+          autoComplete="new-password" onChange={(e) => setValue(e.target.value)} required />
+        <button type="submit" className="btn" disabled={busy !== null || !name.trim() || !value}>
+          {busy === "__new" ? "…" : replacing ? "Заменить секрет" : "Добавить секрет"}
+        </button>
+      </form>
+      {error != null && <div className="secret-error"><ErrorNote error={error} /></div>}
+      <p className="muted small secret-hint">
+        Переменные задаются в <code>[vars]</code> в wrangler.toml. Секреты — здесь или
+        командой <code>wravler secret put ИМЯ</code>; значение после сохранения не показывается.
+      </p>
+    </Card>
+  );
+}
+
+function Settings({ worker: w, onChanged }: { worker: WorkerDetail; onChanged: () => void }) {
   const [deleting, setDeleting] = useState(false);
   return (
     <>
+      <VarsAndSecrets worker={w} onChanged={onChanged} />
+
       <Card title="Модули кода активной версии" flush>
         {w.modules.length === 0 ? (
           <Empty>У воркера нет кода — только статика</Empty>

@@ -46,6 +46,21 @@ function fail(status: number, code: number, message: string): Response {
   return Response.json({ success: false, errors: [{ code, message }], messages: [], result: null }, { status });
 }
 
+/** Общий обработчик изменения секретов: воркера нет → 10007 (wrangler тогда создаёт его сам). */
+async function changeSecrets(
+  env: Env,
+  name: string,
+  changes: Record<string, string | null>,
+  result: () => unknown,
+): Promise<Response> {
+  try {
+    const version = await registry(env).changeSecrets(name, changes);
+    return version === null ? fail(404, 10007, `воркер ${name} не найден`) : ok(result());
+  } catch (e) {
+    return fail(400, 10021, e instanceof Error ? e.message : String(e));
+  }
+}
+
 function registry(env: Env) {
   return env.REGISTRY.get(env.REGISTRY.idFromName("main"));
 }
@@ -138,10 +153,14 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
   }
 
   const vars: Record<string, unknown> = {};
+  const secrets: Record<string, string> = {};
   const durableObjects: DurableObjectBinding[] = [];
   let assetsBinding: string | undefined;
   for (const b of metadata.bindings ?? []) {
+    // имена "__…" заняты служебными биндингами платформы (__DO_…, __ALARMS)
+    if (b.name.startsWith("__")) return { error: `имя биндинга ${b.name}: префикс "__" занят платформой` };
     if (b.type === "plain_text") vars[b.name] = b.text;
+    else if (b.type === "secret_text") secrets[b.name] = b.text ?? ""; // wrangler deploy --secrets-file
     else if (b.type === "assets") assetsBinding = b.name;
     else if (b.type === "json") vars[b.name] = b.json;
     else if (b.type === "durable_object_namespace") {
@@ -192,6 +211,7 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
       compatibilityFlags: metadata.compatibility_flags ?? [],
       vars,
       durableObjects,
+      ...(Object.keys(secrets).length ? { secrets } : {}),
       ...(metadata.annotations?.["workers/message"] ? { message: metadata.annotations["workers/message"] } : {}),
       ...(assets ? { assets: assets.assets } : {}),
     },
@@ -302,7 +322,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "PUT" && rest.startsWith("scripts/") && sub === "") {
     const parsed = await parseUpload(request, name, env);
     if ("error" in parsed) return fail(400, 10021, parsed.error);
-    const version = await registry(env).deploy(name, parsed.meta, parsed.modules);
+    let version: number;
+    try {
+      version = await registry(env).deploy(name, parsed.meta, parsed.modules);
+    } catch (e) {
+      return fail(400, 10021, e instanceof Error ? e.message : String(e));
+    }
     if (parsed.assetSession) await registry(env).endAssetSession(parsed.assetSession);
     // wrangler показывает deployment_id как UUID без дефисов → кодируем в него номер версии
     const deploymentId = version.toString(16).padStart(32, "0");
@@ -348,7 +373,28 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (method === "GET" && sub === "tails") return ok([]);
 
-  if (method === "GET" && sub === "secrets") return ok([]);
+  // Секреты: wrangler secret list / put / delete / bulk. Значения наружу не отдаются.
+  if (method === "GET" && sub === "secrets") {
+    const names = (await registry(env).secretNames(name)) ?? [];
+    return ok(names.map((secret) => ({ name: secret, type: "secret_text" })));
+  }
+  if (method === "PUT" && sub === "secrets") {
+    const body = (await request.json().catch(() => null)) as { name?: string; text?: string } | null;
+    if (!body?.name || typeof body.text !== "string") return fail(400, 10021, "нужны name и text");
+    return changeSecrets(env, name, { [body.name]: body.text }, () => ({ name: body.name, type: "secret_text" }));
+  }
+  const secretPath = sub.match(/^secrets\/(.+)$/);
+  if (method === "DELETE" && secretPath) {
+    const key = decodeURIComponent(secretPath[1]);
+    if (!(await registry(env).secretNames(name))?.includes(key)) return fail(404, 10056, `секрет ${key} не найден`);
+    return changeSecrets(env, name, { [key]: null }, () => null);
+  }
+  if (method === "PATCH" && sub === "secrets-bulk") {
+    const body = (await request.json().catch(() => null)) as { secrets?: Record<string, { text?: string } | null> } | null;
+    const changes: Record<string, string | null> = {};
+    for (const [key, value] of Object.entries(body?.secrets ?? {})) changes[key] = value === null ? null : String(value.text ?? "");
+    return changeSecrets(env, name, changes, () => ({}));
+  }
   if (method === "GET" && sub === "deployments") return ok({ deployments: [] });
   if (sub === "settings") return ok({});
   if (sub === "subdomain") return ok({ enabled: true, previews_enabled: false });

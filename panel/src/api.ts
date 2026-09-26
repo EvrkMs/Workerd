@@ -11,6 +11,7 @@ export interface WorkerSummary {
   assetFiles: number;
   durableObjects: number;
   vars: number;
+  secrets: number;
 }
 
 export interface WorkerDetail extends WorkerSummary {
@@ -18,6 +19,8 @@ export interface WorkerDetail extends WorkerSummary {
   compatibilityDate: string;
   compatibilityFlags: string[];
   varsList: { name: string; value: string }[];
+  /** Только имена: значения секретов сервер не отдаёт. */
+  secretsList: string[];
   durableObjectsList: { binding: string; className: string }[];
   assets: {
     files: number;
@@ -83,6 +86,10 @@ export const api = {
   versions: (name: string) => request<VersionSummary[]>("GET", `/workers/${name}/versions`),
   rollback: (name: string, version: number) => request<{ ok: true }>("POST", `/workers/${name}/rollback`, { version }),
   remove: (name: string) => request<{ ok: true }>("DELETE", `/workers/${name}`),
+  putSecret: (name: string, secret: string, value: string) =>
+    request<{ ok: true; version: number }>("POST", `/workers/${name}/secrets`, { name: secret, value }),
+  deleteSecret: (name: string, secret: string) =>
+    request<{ ok: true; version: number }>("DELETE", `/workers/${name}/secrets?name=${encodeURIComponent(secret)}`),
   startTail: (name: string) => request<{ id: string; url: string }>("POST", `/workers/${name}/tail`),
   stopTail: (name: string, id: string) => request<{ ok: true }>("DELETE", `/workers/${name}/tail?id=${id}`),
 };
