@@ -8,6 +8,7 @@
 # Внутри /app:
 #   config.capnp
 #   <воркер платформы>/index.js
+# egress получает config/egress.capnp в свой volume.
 #
 # По умолчанию деплоит на manager независимо от текущего docker context.
 # Локально: DOCKER_CONTEXT=default sh deploy/deploy.sh
@@ -36,7 +37,8 @@ for dir in "$ROOT"/workers/*/; do
   cp "$dir"/dist/* "$OUT/$name/"
 done
 
-docker compose -f "$ROOT/deploy/compose.yaml" up -d --build
+docker compose -f "$ROOT/deploy/compose.yaml" up -d --build --remove-orphans
+docker compose -f "$ROOT/deploy/compose.yaml" cp "$ROOT/config/egress.capnp" egress:/app/config.capnp
 docker compose -f "$ROOT/deploy/compose.yaml" cp "$OUT/." workerd:/app/
 
 echo "deployed"

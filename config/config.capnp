@@ -11,6 +11,11 @@ const config :Workerd.Config = (
 
     # Хранилище Durable Objects: volume workerd_data
     (name = "storage", disk = (path = "/data", writable = true)),
+
+    # Выход наружу для fetch()/WebSocket/connect() всех воркеров, включая загруженные
+    # на лету (они наследуют "internet"). Сам workerd в internal-сети маршрута наружу
+    # не имеет — всё идёт через egress, который пускает только на публичные адреса.
+    (name = "internet", external = (address = "egress:8080", http = (style = proxy))),
   ],
   sockets = [
     (name = "http", address = "*:8080", http = (), service = "gateway"),

@@ -11,13 +11,13 @@ services:
       # Пустой токен = API закрыт полностью: `docker compose up` мимо deploy.sh
       # пересоздаст контейнер без токена, и wravler начнёт получать 401. Поднимать только через deploy.sh.
       WRAVLER_TOKEN: ${WRAVLER_TOKEN:-}
-    # Порты на хост не публикуем. Сеть caddy_workerd общая только с caddy-server,
-    # поэтому соседи из сети caddy (соседние сервисы и контроллер Caddy) workerd не видят.
+    # Только internal-сеть: шлюза нет, до хоста/LAN/соседей/интернета маршрута нет.
+    # В ней же caddy-server (вход) и egress (выход). Порты на хост не публикуем.
     volumes:
       - workerd_app:/app    # config.capnp + код платформы (кладёт deploy.sh)
       - workerd_data:/data  # реестр воркеров и данные Durable Objects
     networks:
-      - caddy_workerd
+      - workerd_internal
     labels:
       # caddy-docker-proxy. Wildcard выдаётся через DNS-01 — это уже настроено
       # глобально в Caddy (acme_dns cloudflare {env.CF_API_TOKEN}), свой tls-блок
@@ -25,11 +25,24 @@ services:
       caddy: "workers.ava-kk.ru, *.workers.ava-kk.ru"
       caddy.reverse_proxy: "{{upstreams 8080}}"
 
+  # Выход в интернет: тот же образ движка, без JS, только публичные адреса (config/egress.capnp)
+  egress:
+    image: workerd:local
+    restart: unless-stopped
+    volumes:
+      - workerd_egress:/app  # config.capnp egress (кладёт deploy.sh)
+    networks:
+      - workerd_internal     # сюда приходят запросы от workerd
+      - egress               # отсюда — наружу
+
 volumes:
   workerd_app:
   workerd_data:
+  workerd_egress:
 
 networks:
-  caddy_workerd:
+  workerd_internal:
     external: true
-    name: caddy_workerd
+    name: workerd_internal
+  # Обычная сеть с выходом наружу — только для egress
+  egress:
