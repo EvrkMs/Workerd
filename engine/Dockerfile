@@ -26,12 +26,13 @@ RUN apt-get update \
  && chown workerd:workerd /app /data
 
 COPY --from=fetch /workerd /usr/local/bin/workerd
-COPY --chmod=755 engine/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 USER workerd
 WORKDIR /app
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Конфиг лежит в образе (platform/egress). Дополнительные флаги — через command
+# в compose (например --experimental для Worker Loader).
+ENTRYPOINT ["workerd", "serve", "/app/config.capnp", "--verbose"]
 
 # --- сборка воркеров платформы (typecheck + esbuild) ---------------------------
 FROM ${REGISTRY}/node:24-slim AS build
