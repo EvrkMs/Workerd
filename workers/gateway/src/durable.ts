@@ -35,9 +35,16 @@ export class DoNamespace extends WorkerEntrypoint<Env, DoNamespaceProps> {
     return this.host(idHex).call(worker, className, version, method, args) as Promise<unknown>;
   }
 
-  fetchObject(idHex: string, request: Request): Promise<Response> {
+  /**
+   * stub.fetch() объекта. Именно fetch-обработчик, а не RPC-метод: Response с WebSocket
+   * через RPC не передаётся ("Could not serialize WebSocket"), а через fetch — да.
+   * id объекта приходит в заголовке x-platform-object (его ставит прослойка).
+   */
+  async fetch(request: Request): Promise<Response> {
+    const idHex = request.headers.get("x-platform-object") ?? "";
     const { worker, className, version } = this.ctx.props;
     const headers = new Headers(request.headers);
+    headers.delete("x-platform-object");
     headers.set("x-platform-worker", worker);
     headers.set("x-platform-class", className);
     headers.set("x-platform-version", String(version));

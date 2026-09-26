@@ -4,7 +4,7 @@
 // как у DurableObjectNamespace в Cloudflare (синхронные idFromName/get/getByName).
 //
 // Stub объекта — JS Proxy: stub.method(...args) → RPC call() в платформу,
-// stub.fetch(...) → fetchObject(). Сам объект живёт в Host-DO платформы как facet.
+// stub.fetch(...) → fetch-обработчик биндинга (так проходит и WebSocket). Сам объект живёт в Host-DO платформы как facet.
 
 export const PLATFORM_MODULE = "__platform.js";
 
@@ -54,7 +54,13 @@ class DurableObjectNamespace {
       get(target, prop) {
         if (prop in target) return target[prop];
         if (typeof prop !== "string" || prop === "then") return undefined; // stub не thenable
-        if (prop === "fetch") return (input, init) => raw.fetchObject(hex, new Request(input, init));
+        if (prop === "fetch") return (input, init) => {
+          // через fetch, а не RPC: так проходит и WebSocket (Response с webSocket)
+          const request = new Request(input, init);
+          const headers = new Headers(request.headers);
+          headers.set("x-platform-object", hex);
+          return raw.fetch(new Request(request, { headers }));
+        };
         return (...args) => raw.call(hex, prop, args);
       },
     });
