@@ -1,20 +1,27 @@
+# Деплой платформы (из корня репозитория, в WSL):
+#   DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml up -d --build
+# Настройки и токен — в deploy/.env (создаёт tools/wravler/init-token.sh).
 name: workerd
+
+x-build: &build
+  context: ..
+  dockerfile: engine/Dockerfile
 
 services:
   workerd:
-    build: ../engine
-    image: workerd:local
+    build:
+      <<: *build
+      target: platform
+    image: workerd-platform:local
     restart: unless-stopped
     command: ["--experimental"]  # Worker Loader пока экспериментальный
     environment:
-      # Токен API для wravler. deploy.sh берёт его из ~/.config/wravler/token.
-      # Пустой токен = API закрыт полностью: `docker compose up` мимо deploy.sh
-      # пересоздаст контейнер без токена, и wravler начнёт получать 401. Поднимать только через deploy.sh.
-      WRAVLER_TOKEN: ${WRAVLER_TOKEN:-}
+      # Токен API для wravler — из deploy/.env. Без него compose откажется запускаться,
+      # а не поднимет платформу с закрытым API.
+      WRAVLER_TOKEN: "${WRAVLER_TOKEN:?нет WRAVLER_TOKEN в deploy/.env, создай его через tools/wravler/init-token.sh}"
     # Только internal-сеть: шлюза нет, до хоста/LAN/соседей/интернета маршрута нет.
     # В ней же caddy-server (вход) и egress (выход). Порты на хост не публикуем.
     volumes:
-      - workerd_app:/app    # config.capnp + код платформы (кладёт deploy.sh)
       - workerd_data:/data  # реестр воркеров и данные Durable Objects
     networks:
       - workerd_internal
@@ -25,20 +32,34 @@ services:
       caddy: "workers.ava-kk.ru, *.workers.ava-kk.ru"
       caddy.reverse_proxy: "{{upstreams 8080}}"
 
-  # Выход в интернет: тот же образ движка, без JS, только публичные адреса (config/egress.capnp)
+  # Выход в интернет: движок без JS, только публичные адреса (config/egress.capnp)
   egress:
-    image: workerd:local
+    build:
+      <<: *build
+      target: egress
+    image: workerd-egress:local
     restart: unless-stopped
-    volumes:
-      - workerd_egress:/app  # config.capnp egress (кладёт deploy.sh)
     networks:
       - workerd_internal     # сюда приходят запросы от workerd
       - egress               # отсюда — наружу
 
+  # Бэкап /data: согласованные снимки SQLite раз в BACKUP_INTERVAL_HOURS, последние BACKUP_KEEP
+  backup:
+    build:
+      context: ../backup
+    image: workerd-backup:local
+    restart: unless-stopped
+    environment:
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+    volumes:
+      - workerd_data:/data
+      - ${BACKUP_TARGET:-workerd_backups}:/backups
+    network_mode: none  # сеть бэкапу не нужна
+
 volumes:
-  workerd_app:
   workerd_data:
-  workerd_egress:
+  workerd_backups:
 
 networks:
   workerd_internal:

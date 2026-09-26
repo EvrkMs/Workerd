@@ -1,0 +1,10 @@
+# Контекст сборки — весь репозиторий; в образы нужны только engine/, config/, workers/
+**/node_modules
+**/dist
+.build
+.git
+.env
+deploy/.env
+examples
+tools
+backup

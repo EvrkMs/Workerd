@@ -33,9 +33,10 @@ wravler tail ──WebSocket──> TailHub (DO на воркер) <────
 ## Структура
 
 ```
-engine/      образ движка: debian-slim + бинарник workerd, без кода
-deploy/      compose.yaml и deploy.sh (деплой самой платформы)
-config/      config.capnp: статичный конфиг платформы
+engine/      Dockerfile: движок (debian-slim + workerd) и образы platform/egress поверх него
+deploy/      compose.yaml, .env.example (сам .env не в git)
+config/      config.capnp (платформа), egress.capnp (выход в интернет)
+backup/      образ бэкапа /data (sqlite3 + ротация)
 workers/     воркеры платформы
   gateway/   <имя>.workers.ava-kk.ru → воркер из реестра через Worker Loader
   api/       API для wravler + реестр (src/registry.ts)
@@ -47,19 +48,23 @@ examples/    воркеры для проверки, деплоятся чере
   counter/   с DO: пока отклоняется, цель следующего этапа
 ```
 
-В контейнере:
+Образы (`engine/Dockerfile`, контекст сборки — корень репозитория):
 
-| Путь | Volume | Что лежит |
-|---|---|---|
-| `/app` | `workerd_app` | `config.capnp` и код платформы (`gateway/`, `api/`) |
-| `/data` | `workerd_data` | реестр (`platform-Registry/`) и данные DO |
+| Образ | Что внутри |
+|---|---|
+| `engine` | только бинарник workerd, без кода и конфига |
+| `workerd-platform` | engine + `config.capnp` + собранные `gateway/` и `api/` в `/app` |
+| `workerd-egress` | engine + `egress.capnp`, без JS |
+| `workerd-backup` | debian-slim + sqlite3 + `backup/backup.sh` |
+
+Volumes: `workerd_data` (`/data`: реестр `platform-Registry/` и данные DO) и `workerd_backups` (архивы бэкапа).
 
 ## Установка (один раз, в WSL-дистрибутиве `claude`)
 
 ```bash
-sh tools/wravler/init-token.sh                                 # токен в ~/.config/wravler/token
+sh tools/wravler/init-token.sh      # токен: ~/.config/wravler/token и deploy/.env
 (cd tools/wravler && npm install) && npm install -g ./tools/wravler
-sh deploy/deploy.sh                                            # платформа узнаёт токен
+DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml up -d --build
 ```
 
 ## Деплой воркера
@@ -102,14 +107,33 @@ curl -H "Authorization: Bearer $(cat ~/.config/wravler/token)" https://api.worke
 
 ## Деплой платформы
 
-`sh deploy/deploy.sh` собирает `workers/*`, копирует их вместе с `config.capnp` в volume `/app`, workerd (`--watch`) перезапускается. Задеплоенные через wravler воркеры лежат в реестре (`/data`) и никуда не пропадают.
+```bash
+DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml up -d --build
+```
 
-Токен api приходит из `~/.config/wravler/token` через переменную `WRAVLER_TOKEN`. Если токен пустой, api отвечает 401 на всё.
-**Поднимать контейнер только через `deploy.sh`:** обычный `docker compose up` пересоздаст его без токена, и wravler начнёт получать 401.
+Код платформы (TypeScript) собирается и проверяется внутри Docker, скриптов и `docker cp` нет. Контейнер workerd пересоздаётся на несколько секунд, а задеплоенные через wravler воркеры лежат в реестре (`/data`) и никуда не пропадают.
+
+Настройки лежат в `deploy/.env` (в git не попадает, образец — `deploy/.env.example`). compose читает его сам при **любой** команде. Если `WRAVLER_TOKEN` пустой, compose откажется запускаться, поэтому поднять платформу с закрытым API случайно нельзя.
+
+## Бэкап
+
+Сервис `backup` раз в `BACKUP_INTERVAL_HOURS` (по умолчанию 24) снимает копию `/data` в `workerd-data-<время>.tar.gz` и хранит последние `BACKUP_KEEP` (по умолчанию 7). Первая копия делается сразу при старте. Базы SQLite копируются через `.backup`, это согласованный снимок даже во время записи. Куда класть архивы, задаёт `BACKUP_TARGET`: named volume (по умолчанию `workerd_backups`) или абсолютный путь на сервере, доступный на запись uid 10001.
+
+Восстановление:
+
+```bash
+C="docker compose -f deploy/compose.yaml"            # DOCKER_CONTEXT=manager
+$C stop workerd
+docker run --rm -v workerd_workerd_data:/data -v workerd_workerd_backups:/b:ro --entrypoint sh workerd-backup:local \
+  -c 'rm -rf /data/* && tar -xzf /b/workerd-data-<время>.tar.gz -C /data'
+$C start workerd
+```
+
+Пока архивы лежат на том же сервере, что и данные, они спасают от ошибок и порчи базы, но не от потери сервера.
 
 ## Docker
 
-Рабочий контекст — `manager`. `deploy.sh` выставляет его сам через `DOCKER_CONTEXT`, так что текущий контекст значения не имеет. Для ручных команд: `DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml ...`.
+Рабочий контекст — `manager`. compose сам контекст не выбирает, поэтому указывай его явно: `DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml ...`.
 
 Bind mount с относительным путём (`./x:/y`) не работает, потому что демон удалённый. Можно использовать только абсолютный путь на сервере или named volume. Docker Hub недоступен, поэтому базовые образы берутся через `mirror.gcr.io` (аргумент `REGISTRY` в `engine/Dockerfile`).
 
