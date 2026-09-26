@@ -14,7 +14,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { DoAlarmsProps, DoNamespaceProps, Env, PlatformExports } from "./loader";
 import { loadWorker, registry } from "./loader";
 
-const OBJECT_ID = /^[0-9a-f]{1,512}$/;
+const OBJECT_ID = /^[0-9a-f]{64}$/;
 const HOST_ID = /^[0-9a-f]{64}$/;
 
 interface Owner {
@@ -82,8 +82,13 @@ export class Host extends DurableObject<Env> {
 
   private async facet(worker: string, className: string, version: number) {
     this.version ??= (await this.ctx.storage.get<number>("version")) ?? undefined;
-    // Запрос от старой версии (кэш в gateway) не должен откатить объект назад
-    const target = Math.max(version, this.version ?? 0);
+    // Пришла версия старше той, на которой объект работает: это либо запрос из кэша
+    // gateway сразу после деплоя (объект откатывать нельзя), либо откат в панели
+    // (откатывать нужно). Решает реестр — какая версия воркера сейчас активна.
+    let target = version;
+    if (this.version !== undefined && version < this.version) {
+      target = (await registry(this.env).activeVersion(worker)) ?? this.version;
+    }
     if (this.version !== target) {
       if (this.version !== undefined) this.ctx.facets.abort(className, new Error("deployed a new version"));
       this.version = target;
@@ -145,7 +150,7 @@ export class Host extends DurableObject<Env> {
     if (!owner) return;
     // Будильник исполняет актуальная версия воркера; если воркер удалён — последняя известная
     const active = await registry(this.env).activeVersion(owner.worker);
-    const version = Math.max(active ?? 0, (await this.ctx.storage.get<number>("version")) ?? 0);
+    const version = active ?? (await this.ctx.storage.get<number>("version")) ?? 0;
     const facet = (await this.facet(owner.worker, owner.className, version)) as unknown as {
       __platformAlarm(info: { retryCount: number; isRetry: boolean }): Promise<void>;
     };

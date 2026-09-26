@@ -33,6 +33,13 @@ export interface PlatformExports {
   AssetsBinding(options: { props: AssetsProps }): Service<AssetsBinding>;
 }
 
+/**
+ * Лимит CPU на один вызов воркера (как у Cloudflare Workers на платном тарифе).
+ * ВНИМАНИЕ: workerd 1.20260926 его не соблюдает — бесконечный цикл вешает весь процесс
+ * (проверено). Оставлено на случай, если поддержку добавят; защита — снаружи.
+ */
+const WORKER_CPU_MS = 30_000;
+
 export function registry(env: Env) {
   return env.REGISTRY.get(env.REGISTRY.idFromName("main"));
 }
@@ -64,6 +71,8 @@ export function loadWorker(env: Env, exports: PlatformExports, name: string, ver
         [PLATFORM_MODULE]: { js: shimModule(code.mainModule, code.durableObjects.map((d) => d.className)) },
       },
       env: workerEnv,
+      // зависший код (бесконечный цикл) не должен занимать CPU бесконечно
+      limits: { cpuMs: WORKER_CPU_MS },
       // события воркера (console.*, исключения, запросы) → api.tail() → wravler tail
       tails: [env.API],
     } as WorkerLoaderWorkerCode;
