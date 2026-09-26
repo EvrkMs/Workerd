@@ -22,7 +22,7 @@ const config :Workerd.Config = (
   ],
 );
 
-# <имя>.workers.ava-kk.ru → воркер из реестра; api.workers.ava-kk.ru → api
+# <имя>.<ROOT_DOMAIN> → воркер из реестра; api.<ROOT_DOMAIN> → api
 const gatewayWorker :Workerd.Worker = (
   modules = [
     (name = "index.js", esModule = embed "gateway/index.js"),
@@ -30,7 +30,7 @@ const gatewayWorker :Workerd.Worker = (
   compatibilityDate = "2026-09-01",
   compatibilityFlags = ["experimental"],
   bindings = [
-    (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
+    (name = "ROOT_DOMAIN", fromEnvironment = "ROOT_DOMAIN"),  # из deploy/.env
     (name = "API", service = "api"),
     (name = "LOADER", workerLoader = ()),
     (name = "REGISTRY", durableObjectNamespace = (className = "Registry", serviceName = "api")),
@@ -49,7 +49,7 @@ const apiWorker :Workerd.Worker = (
   ],
   durableObjectStorage = (localDisk = "storage"),
   bindings = [
-    (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
+    (name = "ROOT_DOMAIN", fromEnvironment = "ROOT_DOMAIN"),  # из deploy/.env
     (name = "API_TOKEN", fromEnvironment = "WRAVLER_TOKEN"),
     (name = "REGISTRY", durableObjectNamespace = "Registry"),
     (name = "TAILS", durableObjectNamespace = "TailHub"),

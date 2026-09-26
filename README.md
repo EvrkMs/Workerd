@@ -139,7 +139,7 @@ Bind mount с относительным путём (`./x:/y`) не работа
 
 ## Caddy
 
-Контейнер подключён к внешней overlay-сети `workerd_internal` (`--internal --attachable`). Лейблы для caddy-docker-proxy отдают на него `workers.ava-kk.ru` и `*.workers.ava-kk.ru`.
+Контейнер подключён к внешней overlay-сети `workerd_internal` (`--internal --attachable`). Лейблы для caddy-docker-proxy отдают на него `ROOT_DOMAIN` и `*.ROOT_DOMAIN` из `deploy/.env` (у нас `workers.ava-kk.ru`). В DNS нужны обе записи. Gateway и api берут домен из той же переменной. Домен в wravler зашит отдельно.
 
 В стеке Caddy для этого: `caddy-server` в сетях `caddy` и `workerd_internal`, у обоих сервисов `--ingress-networks=caddy,workerd_internal`. Управляющая сеть (`--controller-network`) остаётся `caddy`. Связь контейнеров внутри internal-сети работает, поэтому Caddy видит workerd.
 

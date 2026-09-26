@@ -19,6 +19,8 @@ services:
       # Токен API для wravler — из deploy/.env. Без него compose откажется запускаться,
       # а не поднимет платформу с закрытым API.
       WRAVLER_TOKEN: "${WRAVLER_TOKEN:?нет WRAVLER_TOKEN в deploy/.env, создай его через tools/wravler/init-token.sh}"
+      # Корневой домен: воркеры на <имя>.<ROOT_DOMAIN>, API на api.<ROOT_DOMAIN>
+      ROOT_DOMAIN: "${ROOT_DOMAIN:?нет ROOT_DOMAIN в deploy/.env}"
     # Только internal-сеть: шлюза нет, до хоста/LAN/соседей/интернета маршрута нет.
     # В ней же caddy-server (вход) и egress (выход). Порты на хост не публикуем.
     volumes:
@@ -29,7 +31,8 @@ services:
       # caddy-docker-proxy. Wildcard выдаётся через DNS-01 — это уже настроено
       # глобально в Caddy (acme_dns cloudflare {env.CF_API_TOKEN}), свой tls-блок
       # не добавлять: невалидный блок ломает загрузку конфига для ВСЕХ сайтов.
-      caddy: "workers.ava-kk.ru, *.workers.ava-kk.ru"
+      # DNS: нужны записи <ROOT_DOMAIN> и *.<ROOT_DOMAIN> на Caddy
+      caddy: "${ROOT_DOMAIN}, *.${ROOT_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 8080}}"
 
   # Выход в интернет: движок без JS, только публичные адреса (config/egress.capnp)
