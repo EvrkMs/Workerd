@@ -1,59 +1,50 @@
+# Конфиг платформы. Статичный: деплой воркеров его не меняет —
+# код воркеров лежит в реестре (DO в api) и загружается gateway через Worker Loader.
+# Worker Loader экспериментальный: нужен флаг --experimental (compose command)
+# и compatibilityFlags = ["experimental"] у gateway.
 using Workerd = import "/workerd/workerd.capnp";
 
 const config :Workerd.Config = (
   services = [
     (name = "gateway", worker = .gatewayWorker),
-    (name = "hello", worker = .helloWorker),
-    (name = "counter", worker = .counterWorker),
     (name = "api", worker = .apiWorker),
 
     # Хранилище Durable Objects: volume workerd_data
-    (name = "do-storage", disk = (path = "/data", writable = true)),
+    (name = "storage", disk = (path = "/data", writable = true)),
   ],
   sockets = [
     (name = "http", address = "*:8080", http = (), service = "gateway"),
   ],
 );
 
-# <имя>.workers.ava-kk.ru → биндинг с тем же именем
+# <имя>.workers.ava-kk.ru → воркер из реестра; api.workers.ava-kk.ru → api
 const gatewayWorker :Workerd.Worker = (
   modules = [
     (name = "index.js", esModule = embed "gateway/index.js"),
   ],
   compatibilityDate = "2026-09-01",
+  compatibilityFlags = ["experimental"],
   bindings = [
     (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
-    (name = "hello", service = "hello"),
-    (name = "counter", service = "counter"),
-    (name = "api", service = "api"),
+    (name = "API", service = "api"),
+    (name = "LOADER", workerLoader = ()),
+    (name = "REGISTRY", durableObjectNamespace = (className = "Registry", serviceName = "api")),
   ],
 );
 
-# Заглушка Cloudflare API для wravler: api.workers.ava-kk.ru/client/v4
+# API в формате Cloudflare (/client/v4) для wravler + реестр воркеров
 const apiWorker :Workerd.Worker = (
   modules = [
     (name = "index.js", esModule = embed "api/index.js"),
   ],
   compatibilityDate = "2026-09-01",
-);
-
-const helloWorker :Workerd.Worker = (
-  modules = [
-    (name = "index.js", esModule = embed "hello/index.js"),
-  ],
-  compatibilityDate = "2026-09-01",
-);
-
-const counterWorker :Workerd.Worker = (
-  modules = [
-    (name = "index.js", esModule = embed "counter/index.js"),
-  ],
-  compatibilityDate = "2026-09-01",
   durableObjectNamespaces = [
-    (className = "Counter", uniqueKey = "counter-Counter", enableSql = true),
+    (className = "Registry", uniqueKey = "platform-Registry", enableSql = true),
   ],
-  durableObjectStorage = (localDisk = "do-storage"),
+  durableObjectStorage = (localDisk = "storage"),
   bindings = [
-    (name = "COUNTER", durableObjectNamespace = "Counter"),
+    (name = "ROOT_DOMAIN", text = "workers.ava-kk.ru"),
+    (name = "API_TOKEN", fromEnvironment = "WRAVLER_TOKEN"),
+    (name = "REGISTRY", durableObjectNamespace = "Registry"),
   ],
 );

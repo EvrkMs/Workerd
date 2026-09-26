@@ -1,10 +1,13 @@
 #!/bin/sh
-# Собирает воркеры, раскладывает их вместе с config.capnp в .build/app
+# Деплой самой платформы (gateway + api). Пользовательские воркеры сюда не входят —
+# они деплоятся через wravler и хранятся в реестре.
+#
+# Собирает воркеры платформы, раскладывает их вместе с config.capnp в .build/app
 # и копирует в volume контейнера. workerd (--watch) перезапустится сам.
 #
 # Внутри /app:
 #   config.capnp
-#   <имя воркера>/index.js
+#   <воркер платформы>/index.js
 #
 # По умолчанию деплоит на manager независимо от текущего docker context.
 # Локально: DOCKER_CONTEXT=default sh deploy/deploy.sh
@@ -13,6 +16,13 @@ export DOCKER_CONTEXT="${DOCKER_CONTEXT:-manager}"
 echo "docker context: $DOCKER_CONTEXT"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/.build/app"
+
+TOKEN_FILE="$HOME/.config/wravler/token"
+if [ -z "$WRAVLER_TOKEN" ]; then
+  [ -f "$TOKEN_FILE" ] || { echo "нет $TOKEN_FILE — создай: sh tools/wravler/init-token.sh" >&2; exit 1; }
+  WRAVLER_TOKEN="$(cat "$TOKEN_FILE")"
+fi
+export WRAVLER_TOKEN
 
 rm -rf "$OUT"
 mkdir -p "$OUT"

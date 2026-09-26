@@ -1,13 +1,32 @@
-// Точка входа платформы: <имя>.workers.ava-kk.ru → service binding с тем же именем.
-// Воркеры подключаются биндингами в config.capnp; переменные окружения — в UPPER_CASE,
-// поэтому они никогда не совпадут с именем воркера.
+// Точка входа платформы: <имя>.workers.ava-kk.ru → воркер из реестра,
+// загруженный на лету через Worker Loader. Новая версия = новый id загрузчика,
+// поэтому деплой не требует перезапуска workerd и не трогает остальные воркеры.
+import type { Registry, VersionCode } from "../../api/src/registry";
+import { isValidWorkerName } from "../../api/src/names";
 
 interface Env {
   ROOT_DOMAIN: string;
-  [binding: string]: unknown;
+  API: Fetcher;
+  LOADER: WorkerLoader;
+  REGISTRY: DurableObjectNamespace<Registry>;
 }
 
-const WORKER_NAME = /^[a-z0-9-]+$/;
+// Кэш «имя → активная версия», чтобы не ходить в реестр на каждый запрос.
+// После деплоя новая версия начинает отвечать не позже чем через VERSION_TTL_MS.
+const VERSION_TTL_MS = 1000;
+const versions = new Map<string, { version: number | null; until: number }>();
+
+async function activeVersion(env: Env, name: string): Promise<number | null> {
+  const cached = versions.get(name);
+  if (cached && cached.until > Date.now()) return cached.version;
+  const version = await registry(env).activeVersion(name);
+  versions.set(name, { version, until: Date.now() + VERSION_TTL_MS });
+  return version;
+}
+
+function registry(env: Env) {
+  return env.REGISTRY.get(env.REGISTRY.idFromName("main"));
+}
 
 export default {
   async fetch(request, env) {
@@ -19,11 +38,24 @@ export default {
     }
 
     const name = host.slice(0, -suffix.length);
-    const target = WORKER_NAME.test(name) ? (env[name] as Fetcher | undefined) : undefined;
-    if (!target) {
+    if (name === "api") return env.API.fetch(request);
+    if (!isValidWorkerName(name)) return new Response("not found", { status: 404 });
+
+    const version = await activeVersion(env, name);
+    if (version === null) {
       return new Response(`unknown worker: ${name}`, { status: 404 });
     }
 
-    return target.fetch(request);
+    try {
+      const worker = env.LOADER.get(`${name}@${version}`, async () => {
+        const code: VersionCode = await registry(env).code(version);
+        return code as WorkerLoaderWorkerCode;
+      });
+      return await worker.getEntrypoint().fetch(request);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`worker ${name}@${version} failed: ${message}`);
+      return new Response(`worker ${name} failed: ${message}`, { status: 500 });
+    }
   },
 } satisfies ExportedHandler<Env>;

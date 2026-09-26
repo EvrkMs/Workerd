@@ -1,65 +1,96 @@
 # Workerd
 
 Своя платформа для воркеров на [workerd](https://github.com/cloudflare/workerd), открытом рантайме Cloudflare Workers, без сети Cloudflare.
-Приложения лежат в своих репозиториях, здесь только движок, деплой и конфиг.
+Воркеры деплоятся командой `wravler deploy`, это wrangler, направленный на нашу платформу. После деплоя воркер сразу доступен на `https://<имя>.workers.ava-kk.ru`.
+
+## Как устроено
+
+```
+wravler deploy ──> api.workers.ava-kk.ru (воркер api, формат Cloudflare API /client/v4)
+                     └─> реестр (Durable Object на SQLite): воркеры, версии, код, vars
+
+запрос <имя>.workers.ava-kk.ru ──> gateway ──> реестр: активная версия <имя>
+                                     └─> Worker Loader: LOADER.get("<имя>@<версия>", код) → fetch
+```
+
+- **`config.capnp` статичный.** При деплое воркеров он не меняется, workerd не перезапускается, остальные воркеры не затрагиваются.
+- **Новая версия** — это новый id в Worker Loader. После деплоя она начинает отвечать не позже чем через 1 секунду (кэш версии в gateway).
+- **Ошибка в коде воркера** даёт 500 только ему, остальные продолжают работать.
+- **Worker Loader экспериментальный**, поэтому workerd запускается с `--experimental`, а у gateway стоит `compatibilityFlags = ["experimental"]`. Версию workerd обновлять осознанно и с проверкой.
+
+## Что поддерживается
+
+| | |
+|---|---|
+| ES-модули (`export default { fetch }`) | ✅ |
+| `[vars]` (текст и JSON) | ✅ |
+| `wravler deploy`, `wravler delete` | ✅ |
+| Durable Objects, service bindings, KV, D1, R2, секреты | ❌ деплой отклоняется с понятной ошибкой |
 
 ## Структура
 
 ```
-engine/     образ движка: debian-slim + бинарник workerd, без кода
-deploy/     compose.yaml и deploy.sh
-config/     config.capnp — какие воркеры, сокеты, биндинги
-workers/    воркеры, каждый со своим package.json
-  gateway/  точка входа: <имя>.workers.ava-kk.ru → service binding <имя>
-  hello/    пример воркера
-  counter/  тестовый Durable Object (SQLite): счётчик обращений по пути
+engine/      образ движка: debian-slim + бинарник workerd, без кода
+deploy/      compose.yaml и deploy.sh (деплой самой платформы)
+config/      config.capnp: статичный конфиг платформы
+workers/     воркеры платформы
+  gateway/   <имя>.workers.ava-kk.ru → воркер из реестра через Worker Loader
+  api/       API для wravler + реестр (src/registry.ts)
+tools/
+  wravler/   wrangler 4.141.0 с адресом и токеном нашей платформы
+examples/    воркеры для проверки, деплоятся через wravler
+  hello/
+  counter/   с DO: пока отклоняется, цель следующего этапа
 ```
-
-## Маршрутизация
-
-Все запросы приходят в `gateway`, он выбирает воркер по поддомену. Чтобы добавить воркер:
-1. создать папку `workers/<имя>/`;
-2. в `config.capnp` описать сервис `<имя>` и добавить биндинг `(name = "<имя>", service = "<имя>")` в `gatewayWorker`.
-
-Имена воркеров пишутся в нижнем регистре (`[a-z0-9-]`), переменные окружения — в UPPER_CASE, поэтому они не пересекаются.
-
-## Durable Objects
-
-Хранилище — сервис `do-storage` (`/data`, volume `workerd_data`). Для каждого namespace workerd создаёт папку `/data/<uniqueKey>/`, в ней `<id>.sqlite` на каждый объект и `metadata.sqlite`. Проверено: данные переживают и перезапуск, и пересоздание контейнера.
-
-Для DO нужны `enableSql = true` и `durableObjectStorage = (localDisk = "do-storage")`. `uniqueKey` после запуска не меняется: он определяет, где лежат данные.
 
 В контейнере:
 
 | Путь | Volume | Что лежит |
 |---|---|---|
-| `/app` | `workerd_app` | `config.capnp` и собранные воркеры (`<имя>/index.js`) |
-| `/data` | `workerd_data` | SQLite-файлы Durable Objects |
+| `/app` | `workerd_app` | `config.capnp` и код платформы (`gateway/`, `api/`) |
+| `/data` | `workerd_data` | реестр (`platform-Registry/`) и данные DO |
 
-Пока в `/app` нет конфига, движок ждёт. Когда конфиг появился, запускается с `--watch` и перезапускается сам при каждом новом деплое.
+## Установка (один раз, в WSL-дистрибутиве `claude`)
+
+```bash
+sh tools/wravler/init-token.sh                                 # токен в ~/.config/wravler/token
+(cd tools/wravler && npm install) && npm install -g ./tools/wravler
+sh deploy/deploy.sh                                            # платформа узнаёт токен
+```
+
+## Деплой воркера
+
+```bash
+cd examples/hello
+wravler deploy            # → https://hello.workers.ava-kk.ru
+wravler delete --name hello
+```
+
+wrangler в конце печатает адрес вида `hello.ava.workers.dev`: этот формат зашит в нём. Настоящий адрес `wravler` печатает строкой ниже.
+
+Список воркеров:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.config/wravler/token)" https://api.workers.ava-kk.ru/client/v4/accounts/ava/workers/scripts
+```
+
+## Деплой платформы
+
+`sh deploy/deploy.sh` собирает `workers/*`, копирует их вместе с `config.capnp` в volume `/app`, workerd (`--watch`) перезапускается. Задеплоенные через wravler воркеры лежат в реестре (`/data`) и никуда не пропадают.
+
+Токен api приходит из `~/.config/wravler/token` через переменную `WRAVLER_TOKEN`. Если токен пустой, api отвечает 401 на всё.
 
 ## Docker
 
 Рабочий контекст — `manager`. `deploy.sh` выставляет его сам через `DOCKER_CONTEXT`, так что текущий контекст значения не имеет. Для ручных команд: `DOCKER_CONTEXT=manager docker compose -f deploy/compose.yaml ...`.
 
-Bind mount с относительным путём (`./x:/y`) там не работает, потому что демон удалённый. Можно использовать только абсолютный путь на сервере или named volume.
+Bind mount с относительным путём (`./x:/y`) не работает, потому что демон удалённый. Можно использовать только абсолютный путь на сервере или named volume. Docker Hub недоступен, поэтому базовые образы берутся через `mirror.gcr.io` (аргумент `REGISTRY` в `engine/Dockerfile`).
 
 ## Caddy
 
 Контейнер подключён к внешней сети `caddy`. Лейблы для caddy-docker-proxy отдают на него `workers.ava-kk.ru` и `*.workers.ava-kk.ru`.
 
-Wildcard-сертификат Caddy получает через DNS-01. Эта проверка уже включена в Caddy глобально (`acme_dns cloudflare {env.CF_API_TOKEN}`), DNS-запись `*.workers` есть в Cloudflare.
+Wildcard-сертификат Caddy получает через DNS-01. Эта проверка уже включена в Caddy глобально (`acme_dns cloudflare {env.CF_API_TOKEN}`).
 **Свой `caddy.tls.*` в лейблы не добавлять:** если блок невалидный, Caddy отклоняет весь новый конфиг, и перестают применяться изменения для всех сайтов.
 
 На хост порты не публикуются: Caddy (сервис Swarm, может крутиться на другом узле) ходит к контейнеру через overlay-сеть `caddy`.
-
-Для локального запуска сеть создаётся один раз: `docker network create caddy`.
-
-## Команды
-
-Все команды выполняются в WSL-дистрибутиве `claude`:
-
-```bash
-sh deploy/deploy.sh                       # npm ci (если нужно), проверка типов, сборка, доставка в volume
-curl https://counter.workers.ava-kk.ru/a  # {"path":"/a","count":N}
-```

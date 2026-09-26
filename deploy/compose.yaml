@@ -5,10 +5,15 @@ services:
     build: ../engine
     image: workerd:local
     restart: unless-stopped
+    command: ["--experimental"]  # Worker Loader пока экспериментальный
+    environment:
+      # Токен API для wravler. deploy.sh берёт его из ~/.config/wravler/token.
+      # Пустой токен = API закрыт полностью (поэтому `up` мимо deploy.sh безопасен, но API не работает).
+      WRAVLER_TOKEN: ${WRAVLER_TOKEN:-}
     # Порты на хост не публикуем: Caddy ходит к контейнеру через overlay-сеть caddy
     volumes:
-      - workerd_app:/app    # config.capnp + собранные воркеры (кладёт deploy.sh)
-      - workerd_data:/data  # sqlite Durable Objects
+      - workerd_app:/app    # config.capnp + код платформы (кладёт deploy.sh)
+      - workerd_data:/data  # реестр воркеров и данные Durable Objects
     networks:
       - caddy
     labels:
