@@ -17,6 +17,8 @@ interface Env {
   TAILS: DurableObjectNamespace<TailHub>;
   /** /data на запись: сюда кладутся файлы статики (assets/<hh>/<hash>) */
   STORAGE: Fetcher;
+  /** Собранная панель (panel/dist в образе, /app/panel) */
+  PANEL_UI: Fetcher;
 }
 
 function tailHub(env: Env, name: string) {
@@ -68,6 +70,7 @@ interface UploadMetadata {
       transferred_classes?: unknown[];
     }[];
   };
+  annotations?: Record<string, string>;
   assets?: {
     jwt?: string;
     config?: Omit<AssetConfig, "run_worker_first"> & { run_worker_first?: boolean | string[] };
@@ -189,6 +192,7 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
       compatibilityFlags: metadata.compatibility_flags ?? [],
       vars,
       durableObjects,
+      ...(metadata.annotations?.["workers/message"] ? { message: metadata.annotations["workers/message"] } : {}),
       ...(assets ? { assets: assets.assets } : {}),
     },
     modules,

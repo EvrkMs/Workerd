@@ -1,4 +1,4 @@
-# Контекст сборки — весь репозиторий; в образы нужны только engine/, config/, workers/
+# Контекст сборки — весь репозиторий; в образы нужны только engine/, config/, workers/, panel/
 **/node_modules
 **/dist
 .build

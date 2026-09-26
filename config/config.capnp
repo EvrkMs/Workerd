@@ -15,6 +15,8 @@ const config :Workerd.Config = (
     (name = "storage", disk = (path = "/data", writable = true)),
     # то же, только чтение — для gateway (раздача статики)
     (name = "storage-ro", disk = (path = "/data")),
+    # собранная веб-панель (panel/dist в образе) — раздаёт api на panel.<ROOT_DOMAIN>
+    (name = "panel-ui", disk = (path = "/app/panel")),
 
     # Выход наружу для fetch()/WebSocket/connect() всех воркеров, включая загруженные
     # на лету (они наследуют "internet"). Сам workerd в internal-сети маршрута наружу
@@ -66,5 +68,6 @@ const apiWorker :Workerd.Worker = (
     (name = "REGISTRY", durableObjectNamespace = "Registry"),
     (name = "TAILS", durableObjectNamespace = "TailHub"),
     (name = "STORAGE", service = "storage"),  # запись файлов статики
+    (name = "PANEL_UI", service = "panel-ui"),
   ],
 );

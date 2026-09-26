@@ -1,7 +1,7 @@
 # Образы платформы. Контекст сборки — корень репозитория (см. .dockerignore).
 #
 #   engine   — чистый движок: только бинарник workerd, без кода и конфига
-#   platform — engine + config/config.capnp + собранные workers/gateway и workers/api
+#   platform — engine + config/config.capnp + собранные workers/gateway, workers/api и panel
 #   egress   — engine + config/egress.capnp (без JS: выход в интернет, только публичные адреса)
 #
 # Пользовательские воркеры в образы не входят: они деплоятся через wravler в реестр (/data).
@@ -44,10 +44,20 @@ RUN (cd api && npm ci --no-audit --no-fund) && (cd gateway && npm ci --no-audit 
 COPY workers/ ./
 RUN for w in api gateway; do (cd "$w" && npm run typecheck && npm run build) || exit 1; done
 
+# --- веб-панель (React + Vite) ---------------------------------------------------------
+FROM ${REGISTRY}/node:24-slim AS panel
+WORKDIR /src/panel
+COPY panel/package.json panel/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY panel/ ./
+RUN npm run build
+
 FROM engine AS platform
 COPY config/config.capnp /app/config.capnp
 COPY --from=build /src/workers/gateway/dist/ /app/gateway/
 COPY --from=build /src/workers/api/dist/ /app/api/
+# раздаёт api-воркер на panel.<ROOT_DOMAIN> (disk-сервис panel-ui в config.capnp)
+COPY --from=panel /src/panel/dist/ /app/panel/
 
 FROM engine AS egress
 COPY config/egress.capnp /app/config.capnp

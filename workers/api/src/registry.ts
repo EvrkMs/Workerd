@@ -45,6 +45,8 @@ export interface WorkerMeta {
   /** Нет в версиях, загруженных до поддержки DO. */
   durableObjects?: DurableObjectBinding[];
   assets?: VersionAssets;
+  /** wrangler deploy --message */
+  message?: string;
 }
 
 export interface WorkerSummary {
@@ -54,6 +56,30 @@ export interface WorkerSummary {
   versions: number;
   createdAt: string;
   updatedAt: string;
+  hasCode: boolean;
+  assetFiles: number;
+  durableObjects: number;
+  vars: number;
+}
+
+export interface VersionSummary {
+  id: number;
+  createdAt: string;
+  active: boolean;
+  message: string | null;
+  /** Размер модулей кода, байт. */
+  codeSize: number;
+  assetFiles: number;
+}
+
+export interface WorkerDetail extends WorkerSummary {
+  mainModule: string;
+  compatibilityDate: string;
+  compatibilityFlags: string[];
+  varsList: { name: string; value: string }[];
+  durableObjectsList: DurableObjectBinding[];
+  assets: { files: number; binding: string | null; config: AssetConfig } | null;
+  modules: { name: string; type: ModuleType; size: number }[];
 }
 
 /** Код версии в формате Worker Loader (только сериализуемые через RPC типы). */
@@ -83,6 +109,35 @@ export interface AssetSession {
 }
 
 const ASSET_SESSION_TTL_MS = 60 * 60 * 1000;
+
+type SummaryRow = {
+  name: string;
+  active_version: number;
+  versions: number;
+  created_at: string;
+  updated_at: string;
+  meta: string;
+};
+
+const SUMMARY_SQL = `
+  SELECT w.name, w.active_version, w.created_at, w.updated_at, v.meta,
+         (SELECT count(*) FROM versions x WHERE x.worker = w.name) AS versions
+  FROM workers w JOIN versions v ON v.id = w.active_version`;
+
+function toSummary(r: SummaryRow): WorkerSummary {
+  const meta = JSON.parse(r.meta) as WorkerMeta;
+  return {
+    name: r.name,
+    version: r.active_version,
+    versions: r.versions,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    hasCode: meta.mainModule !== "",
+    assetFiles: meta.assets ? Object.keys(meta.assets.manifest).length : 0,
+    durableObjects: meta.durableObjects?.length ?? 0,
+    vars: Object.keys(meta.vars).length,
+  };
+}
 
 export class Registry extends DurableObject<object> {
   private readonly sql: SqlStorage;
@@ -288,19 +343,79 @@ export class Registry extends DurableObject<object> {
 
   list(): WorkerSummary[] {
     return this.sql
-      .exec<{ name: string; active_version: number; versions: number; created_at: string; updated_at: string }>(
-        `SELECT w.name, w.active_version, w.created_at, w.updated_at,
-                (SELECT count(*) FROM versions v WHERE v.worker = w.name) AS versions
-         FROM workers w ORDER BY w.name`,
+      .exec<SummaryRow>(`${SUMMARY_SQL} ORDER BY w.name`)
+      .toArray()
+      .map(toSummary);
+  }
+
+  /** Всё о воркере и его активной версии — для панели. */
+  detail(name: string): WorkerDetail | null {
+    const row = this.sql.exec<SummaryRow>(`${SUMMARY_SQL} WHERE w.name = ?`, name).toArray()[0];
+    if (!row) return null;
+    const meta = JSON.parse(row.meta) as WorkerMeta;
+    const modules = this.sql
+      .exec<{ name: string; type: ModuleType; size: number }>(
+        "SELECT name, type, length(content) AS size FROM modules WHERE version_id = ? ORDER BY name",
+        row.active_version,
+      )
+      .toArray();
+    return {
+      ...toSummary(row),
+      mainModule: meta.mainModule,
+      compatibilityDate: meta.compatibilityDate,
+      compatibilityFlags: meta.compatibilityFlags,
+      varsList: Object.entries(meta.vars).map(([name, value]) => ({
+        name,
+        value: typeof value === "string" ? value : JSON.stringify(value),
+      })),
+      durableObjectsList: meta.durableObjects ?? [],
+      assets: meta.assets
+        ? {
+            files: Object.keys(meta.assets.manifest).length,
+            binding: meta.assets.binding ?? null,
+            config: meta.assets.config,
+          }
+        : null,
+      modules,
+    };
+  }
+
+  versionsOf(name: string): VersionSummary[] {
+    const active = this.activeVersion(name);
+    return this.sql
+      .exec<{ id: number; created_at: string; meta: string; code_size: number | null }>(
+        `SELECT v.id, v.created_at, v.meta,
+                (SELECT sum(length(content)) FROM modules m WHERE m.version_id = v.id) AS code_size
+         FROM versions v WHERE v.worker = ? ORDER BY v.id DESC`,
+        name,
       )
       .toArray()
-      .map((r) => ({
-        name: r.name,
-        version: r.active_version,
-        versions: r.versions,
-        createdAt: r.created_at,
-        updatedAt: r.updated_at,
-      }));
+      .map((r) => {
+        const meta = JSON.parse(r.meta) as WorkerMeta;
+        return {
+          id: r.id,
+          createdAt: r.created_at,
+          active: r.id === active,
+          message: meta.message ?? null,
+          codeSize: r.code_size ?? 0,
+          assetFiles: meta.assets ? Object.keys(meta.assets.manifest).length : 0,
+        };
+      });
+  }
+
+  /** Откат/переключение: делает активной одну из уже загруженных версий. */
+  setActive(name: string, version: number): boolean {
+    const owned = this.sql
+      .exec("SELECT 1 FROM versions WHERE id = ? AND worker = ?", version, name)
+      .toArray().length > 0;
+    if (!owned) return false;
+    this.sql.exec(
+      "UPDATE workers SET active_version = ?, updated_at = ? WHERE name = ?",
+      version,
+      new Date().toISOString(),
+      name,
+    );
+    return true;
   }
 
   /** Удаляет воркер со всеми версиями. Возвращает false, если такого не было. */
