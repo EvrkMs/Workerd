@@ -3,7 +3,7 @@
 // и env собираются здесь, в одном месте.
 import type { Registry, VersionCode } from "../../api/src/registry";
 import type { AssetsBinding, AssetsProps } from "./assets";
-import type { DoNamespace } from "./durable";
+import type { DoAlarms, DoNamespace } from "./durable";
 import { PLATFORM_MODULE, shimModule } from "./shim";
 
 export interface Env {
@@ -22,9 +22,14 @@ export interface DoNamespaceProps {
   version: number;
 }
 
+export interface DoAlarmsProps {
+  worker: string;
+}
+
 /** ctx.exports платформы: нужен, чтобы выдать воркеру биндинг DoNamespace с props. */
 export interface PlatformExports {
   DoNamespace(options: { props: DoNamespaceProps }): Service<DoNamespace>;
+  DoAlarms(options: { props: DoAlarmsProps }): Service<DoAlarms>;
   AssetsBinding(options: { props: AssetsProps }): Service<AssetsBinding>;
 }
 
@@ -41,6 +46,10 @@ export function loadWorker(env: Env, exports: PlatformExports, name: string, ver
       workerEnv[`__DO_${d.binding}`] = exports.DoNamespace({
         props: { worker: name, className: d.className, version },
       });
+    }
+    if (code.durableObjects.length) {
+      // будильники объектов (прослойка подменяет ими ctx.storage.setAlarm и т.д.)
+      workerEnv.__ALARMS = exports.DoAlarms({ props: { worker: name } });
     }
     if (code.assetsBinding) {
       workerEnv[code.assetsBinding] = exports.AssetsBinding({ props: { worker: name, version } });

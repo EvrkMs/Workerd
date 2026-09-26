@@ -14,7 +14,8 @@ export function shimModule(mainModule: string, doClasses: string[]): string {
     .map(
       (cls) => `
 export class ${cls} extends (user.${cls} ?? missingClass(${JSON.stringify(cls)})) {
-  constructor(ctx, env) { super(ctx, wrapEnv(env)); }
+  constructor(ctx, env) { patchAlarms(ctx, env); super(ctx, wrapEnv(env)); }
+  __platformAlarm(info) { return typeof this.alarm === "function" ? this.alarm(info) : undefined; }
 }`,
     )
     .join("\n");
@@ -60,6 +61,17 @@ class DurableObjectNamespace {
   }
 }
 
+// facet сам ставить будильники не может — ведём их через Host (env.__ALARMS, id объекта = id Host)
+function patchAlarms(ctx, env) {
+  const alarms = env && env.__ALARMS;
+  if (!alarms) return;
+  const host = ctx.id.toString();
+  const storage = ctx.storage;
+  storage.setAlarm = (time) => alarms.set(host, time instanceof Date ? time.getTime() : Number(time));
+  storage.getAlarm = () => alarms.get(host);
+  storage.deleteAlarm = () => alarms.delete(host);
+}
+
 const wrapped = new WeakMap();
 function wrapEnv(env) {
   if (!env || typeof env !== "object") return env;
@@ -68,7 +80,7 @@ function wrapEnv(env) {
   out = {};
   for (const [key, value] of Object.entries(env)) {
     if (key.startsWith("__DO_")) out[key.slice(5)] = new DurableObjectNamespace(value);
-    else out[key] = value;
+    else if (key !== "__ALARMS") out[key] = value;
   }
   wrapped.set(env, out);
   return out;

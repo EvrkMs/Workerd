@@ -3,12 +3,12 @@
 // поэтому деплой не требует перезапуска workerd и не трогает остальные воркеры.
 import { isValidWorkerName } from "../../api/src/names";
 import { AssetsBinding, serveAsset, versionInfo } from "./assets";
-import { DoNamespace, Host } from "./durable";
+import { DoAlarms, DoNamespace, Host } from "./durable";
 import type { Env, PlatformExports } from "./loader";
 import { loadWorker, registry } from "./loader";
 
 // ctx.exports и Durable Object namespace берут классы из главного модуля
-export { AssetsBinding, DoNamespace, Host };
+export { AssetsBinding, DoAlarms, DoNamespace, Host };
 
 // Кэш «имя → активная версия», чтобы не ходить в реестр на каждый запрос.
 // После деплоя новая версия начинает отвечать не позже чем через VERSION_TTL_MS.
