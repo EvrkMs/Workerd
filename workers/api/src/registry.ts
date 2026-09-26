@@ -20,6 +20,8 @@ export interface WorkerMeta {
 export interface WorkerSummary {
   name: string;
   version: number;
+  /** Сколько версий хранится в реестре. */
+  versions: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -140,11 +142,19 @@ export class Registry extends DurableObject<object> {
 
   list(): WorkerSummary[] {
     return this.sql
-      .exec<{ name: string; active_version: number; created_at: string; updated_at: string }>(
-        "SELECT name, active_version, created_at, updated_at FROM workers ORDER BY name",
+      .exec<{ name: string; active_version: number; versions: number; created_at: string; updated_at: string }>(
+        `SELECT w.name, w.active_version, w.created_at, w.updated_at,
+                (SELECT count(*) FROM versions v WHERE v.worker = w.name) AS versions
+         FROM workers w ORDER BY w.name`,
       )
       .toArray()
-      .map((r) => ({ name: r.name, version: r.active_version, createdAt: r.created_at, updatedAt: r.updated_at }));
+      .map((r) => ({
+        name: r.name,
+        version: r.active_version,
+        versions: r.versions,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      }));
   }
 
   /** Удаляет воркер со всеми версиями. Возвращает false, если такого не было. */

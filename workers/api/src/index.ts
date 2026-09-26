@@ -4,6 +4,7 @@
 import type { ModuleType, UploadedModule, WorkerMeta } from "./registry";
 import { Registry } from "./registry";
 import { TailHub, serializeEvent, workerFromEvent } from "./tail";
+import { handlePanel } from "./panel";
 import { RESERVED_NAMES, isValidWorkerName } from "./names";
 
 export { Registry, TailHub };
@@ -119,6 +120,11 @@ async function parseUpload(request: Request): Promise<Parsed> {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // Веб-панель: panel.<ROOT_DOMAIN> (вход по тому же токену, своя сессия в cookie)
+    if (url.hostname === `panel.${env.ROOT_DOMAIN}`) {
+      return handlePanel(request, env);
+    }
 
     // WebSocket wrangler tail: /tail/<воркер>/<сессия>. Токен wrangler сюда не шлёт,
     // секрет — сам id сессии, который выдаётся только по токену (POST .../tails).

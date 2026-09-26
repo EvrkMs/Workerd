@@ -38,7 +38,8 @@ export default {
     }
 
     const name = host.slice(0, -suffix.length);
-    if (name === "api") return env.API.fetch(request);
+    // служебные поддомены: api (для wravler) и panel (веб-панель) живут в api-воркере
+    if (name === "api" || name === "panel") return env.API.fetch(request);
     if (!isValidWorkerName(name)) return new Response("not found", { status: 404 });
 
     const version = await activeVersion(env, name);
