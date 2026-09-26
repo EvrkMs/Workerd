@@ -2,6 +2,7 @@
 // используют и gateway (запросы), и Host-DO (классы Durable Objects), поэтому код
 // и env собираются здесь, в одном месте.
 import type { Registry, VersionCode } from "../../api/src/registry";
+import type { AssetsBinding, AssetsProps } from "./assets";
 import type { DoNamespace } from "./durable";
 import { PLATFORM_MODULE, shimModule } from "./shim";
 
@@ -11,6 +12,8 @@ export interface Env {
   LOADER: WorkerLoader;
   REGISTRY: DurableObjectNamespace<Registry>;
   HOST: DurableObjectNamespace;
+  /** /data только для чтения: файлы статики */
+  ASSET_FILES: Fetcher;
 }
 
 export interface DoNamespaceProps {
@@ -22,6 +25,7 @@ export interface DoNamespaceProps {
 /** ctx.exports платформы: нужен, чтобы выдать воркеру биндинг DoNamespace с props. */
 export interface PlatformExports {
   DoNamespace(options: { props: DoNamespaceProps }): Service<DoNamespace>;
+  AssetsBinding(options: { props: AssetsProps }): Service<AssetsBinding>;
 }
 
 export function registry(env: Env) {
@@ -37,6 +41,9 @@ export function loadWorker(env: Env, exports: PlatformExports, name: string, ver
       workerEnv[`__DO_${d.binding}`] = exports.DoNamespace({
         props: { worker: name, className: d.className, version },
       });
+    }
+    if (code.assetsBinding) {
+      workerEnv[code.assetsBinding] = exports.AssetsBinding({ props: { worker: name, version } });
     }
 
     return {

@@ -16,13 +16,35 @@ export interface DurableObjectBinding {
   className: string;
 }
 
+/** Настройки статики из wrangler.toml [assets]. */
+export interface AssetConfig {
+  html_handling?: "auto-trailing-slash" | "force-trailing-slash" | "drop-trailing-slash" | "none";
+  not_found_handling?: "single-page-application" | "404-page" | "none";
+  run_worker_first?: boolean;
+}
+
+/** Статика версии: путь → хэш файла, настройки, имя биндинга (env.ASSETS). */
+export interface VersionAssets {
+  manifest: Record<string, string>;
+  config: AssetConfig;
+  binding?: string;
+}
+
+/** Файл статики для gateway: хэш (он же имя на диске) и Content-Type. */
+export interface AssetFile {
+  hash: string;
+  contentType: string | null;
+}
+
 export interface WorkerMeta {
+  /** Пустая строка — у воркера нет кода, только статика. */
   mainModule: string;
   compatibilityDate: string;
   compatibilityFlags: string[];
   vars: Record<string, unknown>;
   /** Нет в версиях, загруженных до поддержки DO. */
   durableObjects?: DurableObjectBinding[];
+  assets?: VersionAssets;
 }
 
 export interface WorkerSummary {
@@ -42,7 +64,25 @@ export interface VersionCode {
   modules: Record<string, { js: string } | { cjs: string } | { text: string } | { json: unknown } | { data: ArrayBuffer } | { wasm: ArrayBuffer }>;
   env: Record<string, unknown>;
   durableObjects: DurableObjectBinding[];
+  /** Имя биндинга статики (env.ASSETS), если он объявлен. */
+  assetsBinding: string | null;
 }
+
+/** Всё, что gateway нужно знать о версии, чтобы решить, куда отправить запрос. */
+export interface VersionInfo {
+  hasCode: boolean;
+  assets: { config: AssetConfig; files: Record<string, AssetFile> } | null;
+}
+
+/** Сессия загрузки статики (wrangler: assets-upload-session → assets/upload). */
+export interface AssetSession {
+  worker: string;
+  manifest: Record<string, string>;
+  /** Сколько хэшей из манифеста ещё не загружено. */
+  missing: number;
+}
+
+const ASSET_SESSION_TTL_MS = 60 * 60 * 1000;
 
 export class Registry extends DurableObject<object> {
   private readonly sql: SqlStorage;
@@ -70,6 +110,18 @@ export class Registry extends DurableObject<object> {
           type       TEXT NOT NULL,
           content    BLOB NOT NULL,
           PRIMARY KEY (version_id, name)
+        );
+        -- файлы статики лежат на диске: /data/assets/<hash[0:2]>/<hash>
+        CREATE TABLE IF NOT EXISTS asset_blobs (
+          hash         TEXT PRIMARY KEY,
+          content_type TEXT,
+          size         INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS asset_sessions (
+          id         TEXT PRIMARY KEY,
+          worker     TEXT NOT NULL,
+          manifest   TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
         );
       `);
     });
@@ -147,7 +199,91 @@ export class Registry extends DurableObject<object> {
       modules,
       env: meta.vars,
       durableObjects: meta.durableObjects ?? [],
+      assetsBinding: meta.assets?.binding ?? null,
     };
+  }
+
+  info(version: number): VersionInfo {
+    const row = this.sql
+      .exec<{ meta: string }>("SELECT meta FROM versions WHERE id = ?", version)
+      .toArray()[0];
+    if (!row) throw new Error(`version ${version} not found`);
+    const meta = JSON.parse(row.meta) as WorkerMeta;
+    if (!meta.assets) return { hasCode: meta.mainModule !== "", assets: null };
+
+    const types = new Map<string, string | null>();
+    for (const b of this.sql.exec<{ hash: string; content_type: string | null }>(
+      `SELECT hash, content_type FROM asset_blobs
+       WHERE hash IN (SELECT value FROM json_each(?))`,
+      JSON.stringify(Object.values(meta.assets.manifest)),
+    )) {
+      types.set(b.hash, b.content_type);
+    }
+    const files: Record<string, AssetFile> = {};
+    for (const [path, hash] of Object.entries(meta.assets.manifest)) {
+      files[path] = { hash, contentType: types.get(hash) ?? null };
+    }
+    return { hasCode: meta.mainModule !== "", assets: { config: meta.assets.config, files } };
+  }
+
+  // --- статика -----------------------------------------------------------------
+
+  /** Начинает загрузку: возвращает id сессии и хэши, которых ещё нет на диске. */
+  startAssetSession(worker: string, manifest: Record<string, string>): { id: string; missing: string[] } {
+    const hashes = [...new Set(Object.values(manifest))];
+    const present = new Set(
+      this.sql
+        .exec<{ hash: string }>(
+          "SELECT hash FROM asset_blobs WHERE hash IN (SELECT value FROM json_each(?))",
+          JSON.stringify(hashes),
+        )
+        .toArray()
+        .map((r) => r.hash),
+    );
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    this.sql.exec("DELETE FROM asset_sessions WHERE expires_at < ?", now);
+    this.sql.exec(
+      "INSERT INTO asset_sessions (id, worker, manifest, expires_at) VALUES (?, ?, ?, ?)",
+      id,
+      worker,
+      JSON.stringify(manifest),
+      now + ASSET_SESSION_TTL_MS,
+    );
+    return { id, missing: hashes.filter((h) => !present.has(h)) };
+  }
+
+  assetSession(id: string): AssetSession | null {
+    const row = this.sql
+      .exec<{ worker: string; manifest: string; expires_at: number }>(
+        "SELECT worker, manifest, expires_at FROM asset_sessions WHERE id = ?",
+        id,
+      )
+      .toArray()[0];
+    if (!row || row.expires_at < Date.now()) return null;
+    const manifest = JSON.parse(row.manifest) as Record<string, string>;
+    const hashes = [...new Set(Object.values(manifest))];
+    const present = this.sql
+      .exec<{ n: number }>(
+        "SELECT count(*) AS n FROM asset_blobs WHERE hash IN (SELECT value FROM json_each(?))",
+        JSON.stringify(hashes),
+      )
+      .one().n;
+    return { worker: row.worker, manifest, missing: hashes.length - present };
+  }
+
+  /** Файл уже записан на диск — отмечаем его как доступный. */
+  recordAssetBlob(hash: string, contentType: string | null, size: number): void {
+    this.sql.exec(
+      "INSERT INTO asset_blobs (hash, content_type, size) VALUES (?, ?, ?) ON CONFLICT (hash) DO NOTHING",
+      hash,
+      contentType,
+      size,
+    );
+  }
+
+  endAssetSession(id: string): void {
+    this.sql.exec("DELETE FROM asset_sessions WHERE id = ?", id);
   }
 
   list(): WorkerSummary[] {

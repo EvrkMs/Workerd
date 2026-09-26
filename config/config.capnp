@@ -9,8 +9,12 @@ const config :Workerd.Config = (
     (name = "gateway", worker = .gatewayWorker),
     (name = "api", worker = .apiWorker),
 
-    # Хранилище Durable Objects: volume workerd_data
+    # Хранилище Durable Objects и файлов статики: volume workerd_data.
+    # Путь должен существовать при старте, иначе workerd не запустится — поэтому
+    # статика лежит внутри /data (assets/<hh>/<hash>), а не отдельным сервисом.
     (name = "storage", disk = (path = "/data", writable = true)),
+    # то же, только чтение — для gateway (раздача статики)
+    (name = "storage-ro", disk = (path = "/data")),
 
     # Выход наружу для fetch()/WebSocket/connect() всех воркеров, включая загруженные
     # на лету (они наследуют "internet"). Сам workerd в internal-сети маршрута наружу
@@ -41,6 +45,7 @@ const gatewayWorker :Workerd.Worker = (
     (name = "LOADER", workerLoader = ()),
     (name = "REGISTRY", durableObjectNamespace = (className = "Registry", serviceName = "api")),
     (name = "HOST", durableObjectNamespace = "Host"),
+    (name = "ASSET_FILES", service = "storage-ro"),
   ],
 );
 
@@ -60,5 +65,6 @@ const apiWorker :Workerd.Worker = (
     (name = "API_TOKEN", fromEnvironment = "WRAVLER_TOKEN"),
     (name = "REGISTRY", durableObjectNamespace = "Registry"),
     (name = "TAILS", durableObjectNamespace = "TailHub"),
+    (name = "STORAGE", service = "storage"),  # запись файлов статики
   ],
 );

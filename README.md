@@ -31,6 +31,8 @@ wravler tail ──WebSocket──> TailHub (DO на воркер) <────
 | `wravler tail` (логи, исключения, запросы) | ✅ фильтры (`--status`, `--method`…) пока игнорируются |
 | Durable Objects своего воркера (SQLite и KV-API storage, RPC-методы, `fetch`) | ✅ см. раздел «Durable Objects» |
 | DO другого воркера (`script_name`), миграции `renamed_classes` / `transferred_classes` | ❌ деплой отклоняется |
+| Статика `[assets]`: с кодом и без, `env.ASSETS`, `404-page`, SPA | ✅ см. раздел «Статика» |
+| `run_worker_first` со списком путей | ❌ деплой отклоняется (true/false поддерживается) |
 | Service bindings, KV, D1, R2, секреты | ❌ деплой отклоняется с понятной ошибкой |
 
 ## Структура
@@ -41,14 +43,16 @@ deploy/      compose.yaml, .env.example (сам .env не в git)
 config/      config.capnp (платформа), egress.capnp (выход в интернет)
 backup/      образ бэкапа /data (sqlite3 + ротация)
 workers/     воркеры платформы
-  gateway/   <имя>.workers.ava-kk.ru → воркер из реестра через Worker Loader
-  api/       API для wravler + реестр (src/registry.ts)
+  gateway/   <имя>.<ROOT_DOMAIN> → статика или воркер из реестра через Worker Loader
+             src/loader.ts — загрузка, shim.ts — прослойка env, durable.ts — DO, assets.ts — статика
+  api/       API для wravler, реестр (src/registry.ts), статика (src/assets.ts), панель, tail
 tools/
   wravler/   wrangler 4.141.0 с адресом и токеном нашей платформы
 examples/    воркеры для проверки, деплоятся через wravler
   test/      тестовый воркер: страница с версией из [vars], /json, /echo, /error
   hello/
   counter/   Durable Object на SQLite: счётчик обращений по пути
+  site/      статика + код: страницы из public/, /api/time, env.ASSETS, 404.html
 ```
 
 Образы (`engine/Dockerfile`, контекст сборки — корень репозитория):
@@ -103,6 +107,23 @@ new_sqlite_classes = ["Counter"]
 - Данные лежат в `/data/platform-Host/` и попадают в бэкап. При удалении воркера они **не удаляются**: если снова задеплоить воркер с тем же именем, он найдёт свои данные.
 
 Отличия от Cloudflare: id объекта — это hex от имени, а не 64-символьный хэш. Вызовы через stub проксируются, поэтому аргументы и результаты должны быть сериализуемыми (как у RPC). Цепочки вида `stub.a.b()` не поддерживаются. Alarms и WebSocket Hibernation внутри facet не проверялись.
+
+## Статика
+
+В `wrangler.toml` всё как в Cloudflare. Можно с кодом (`main`) или без него:
+
+```toml
+[assets]
+directory = "./public"
+binding = "ASSETS"                      # необязательно: env.ASSETS.fetch(request) из кода
+not_found_handling = "404-page"         # или "single-page-application"
+```
+
+Порядок обработки запроса: сначала файл из статики, потом код воркера. Если кода нет, применяется `not_found_handling`. С `run_worker_first = true` сначала вызывается код, а статика ему доступна через `env.ASSETS`. Поиск по пути: `/about` → `about.html` или `about/index.html`, `/dir/` → `dir/index.html` (при `html_handling = "none"` — только точное совпадение). Файлы отдаются с правильным `Content-Type`, `ETag` = хэш, есть `304 Not Modified`.
+
+Как устроено: при `wravler deploy` wrangler отправляет манифест «путь → хэш». api отвечает, каких файлов по хэшу у него ещё нет, и принимает только их (`api/src/assets.ts`). Поэтому повторный деплой без изменений ничего не загружает. Файлы лежат на диске по хэшу, `/data/assets/<2 символа>/<хэш>`, одинаковые файлы разных версий и воркеров хранятся один раз и попадают в бэкап. Манифест версии хранится в реестре. Gateway читает файлы через disk-сервис только для чтения.
+
+Отличия от Cloudflare: нет редиректов `html_handling` (`/about.html` не перенаправляется на `/about`), не поддерживаются `_headers` и `_redirects`. Файлы, на которые больше не ссылается ни одна версия, пока не удаляются.
 
 ## Панель
 

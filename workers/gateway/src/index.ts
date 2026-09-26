@@ -2,12 +2,13 @@
 // загруженный на лету через Worker Loader. Новая версия = новый id загрузчика,
 // поэтому деплой не требует перезапуска workerd и не трогает остальные воркеры.
 import { isValidWorkerName } from "../../api/src/names";
+import { AssetsBinding, serveAsset, versionInfo } from "./assets";
 import { DoNamespace, Host } from "./durable";
 import type { Env, PlatformExports } from "./loader";
 import { loadWorker, registry } from "./loader";
 
 // ctx.exports и Durable Object namespace берут классы из главного модуля
-export { DoNamespace, Host };
+export { AssetsBinding, DoNamespace, Host };
 
 // Кэш «имя → активная версия», чтобы не ходить в реестр на каждый запрос.
 // После деплоя новая версия начинает отвечать не позже чем через VERSION_TTL_MS.
@@ -33,7 +34,12 @@ export default {
 
     const name = host.slice(0, -suffix.length);
     // служебные поддомены: api (для wravler) и panel (веб-панель) живут в api-воркере
-    if (name === "api" || name === "panel") return env.API.fetch(request);
+    if (name === "api" || name === "panel") {
+      // Тело читаем целиком: при пересылке потоком workerd пишет в лог
+      // «Can't read from request stream after response», если api ответил раньше.
+      const body = request.body ? await request.arrayBuffer() : null;
+      return env.API.fetch(new Request(request, { body }));
+    }
     if (!isValidWorkerName(name)) return new Response("not found", { status: 404 });
 
     const version = await activeVersion(env, name);
@@ -42,6 +48,14 @@ export default {
     }
 
     try {
+      // Статика: сначала файл, потом код воркера (если нет run_worker_first)
+      const info = await versionInfo(env, name, version);
+      if (info.assets && !info.assets.config.run_worker_first) {
+        const asset = await serveAsset(env, request, info.assets, info.hasCode);
+        if (asset) return asset;
+      }
+      if (!info.hasCode) return new Response("not found", { status: 404 });
+
       const exports = (ctx as unknown as { exports: PlatformExports }).exports;
       return await loadWorker(env, exports, name, version).getEntrypoint().fetch(request);
     } catch (e) {

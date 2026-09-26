@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>site · workerd</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <img src="/logo.svg" alt="" width="48" height="48">
+    <h1>Статика на своей платформе</h1>
+    <p>Эта страница — файл из <code>public/</code>, код воркера для неё не вызывается.</p>
+    <p>Время с сервера: <code id="time">…</code></p>
+    <p><a href="/about">О примере</a> · <a href="/missing">несуществующая страница</a></p>
+  </main>
+  <script>
+    fetch("/api/time").then((r) => r.json()).then((d) => (document.getElementById("time").textContent = d.now));
+  </script>
+</body>
+</html>

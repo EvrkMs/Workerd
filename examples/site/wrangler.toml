@@ -1,0 +1,13 @@
+# Пример статики + код: wravler deploy → https://site.<ROOT_DOMAIN>
+#   /            → public/index.html (статика отдаётся без кода воркера)
+#   /about       → public/about.html
+#   /api/time    → код воркера
+#   /missing     → public/404.html (not_found_handling = "404-page")
+name = "site"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "404-page"

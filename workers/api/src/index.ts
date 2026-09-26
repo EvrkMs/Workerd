@@ -1,11 +1,12 @@
 // API платформы в формате Cloudflare API (/client/v4) — ровно то подмножество,
 // которое нужно `wravler deploy` / `wravler delete` / `wravler tail`.
 // Код воркеров хранится в реестре (DO), живые логи идут через TailHub (DO).
-import type { DurableObjectBinding, ModuleType, UploadedModule, WorkerMeta } from "./registry";
+import type { AssetConfig, DurableObjectBinding, ModuleType, UploadedModule, VersionAssets, WorkerMeta } from "./registry";
 import { Registry } from "./registry";
 import { TailHub, serializeEvent, workerFromEvent } from "./tail";
 import { handlePanel } from "./panel";
 import { RESERVED_NAMES, isValidWorkerName } from "./names";
+import { buckets, handleAssetUpload, parseManifest, parseSessionToken, sessionToken } from "./assets";
 
 export { Registry, TailHub };
 
@@ -14,6 +15,8 @@ interface Env {
   ROOT_DOMAIN: string;
   REGISTRY: DurableObjectNamespace<Registry>;
   TAILS: DurableObjectNamespace<TailHub>;
+  /** /data на запись: сюда кладутся файлы статики (assets/<hh>/<hash>) */
+  STORAGE: Fetcher;
 }
 
 function tailHub(env: Env, name: string) {
@@ -65,6 +68,10 @@ interface UploadMetadata {
       transferred_classes?: unknown[];
     }[];
   };
+  assets?: {
+    jwt?: string;
+    config?: Omit<AssetConfig, "run_worker_first"> & { run_worker_first?: boolean | string[] };
+  };
 }
 
 /** Модуль-прослойка платформы, которую gateway подмешивает в код воркера. */
@@ -80,22 +87,59 @@ const MODULE_TYPES: Record<string, ModuleType> = {
   "application/wasm": "wasm",
 };
 
-type Parsed = { meta: WorkerMeta; modules: UploadedModule[] } | { error: string };
+type Parsed = { meta: WorkerMeta; modules: UploadedModule[]; assetSession: string | null } | { error: string };
 
-async function parseUpload(request: Request, workerName: string): Promise<Parsed> {
+/** Статика из metadata.assets: completion-jwt → манифест сессии загрузки. */
+async function parseAssets(
+  metadata: UploadMetadata,
+  binding: string | undefined,
+  workerName: string,
+  env: Env,
+): Promise<{ assets: VersionAssets; session: string } | { error: string } | null> {
+  if (!metadata.assets?.jwt) {
+    return binding ? { error: `биндинг ${binding} (assets): в загрузке нет статики` } : null;
+  }
+  const sessionId = parseSessionToken(metadata.assets.jwt, "complete");
+  const session = sessionId ? await registry(env).assetSession(sessionId) : null;
+  if (!sessionId || !session || session.worker !== workerName) {
+    return { error: "сессия загрузки статики не найдена или истекла — запусти деплой ещё раз" };
+  }
+  if (session.missing > 0) return { error: `статика загружена не полностью: не хватает ${session.missing} файлов` };
+
+  const config = metadata.assets.config ?? {};
+  if (Array.isArray(config.run_worker_first)) {
+    return { error: "run_worker_first со списком путей платформа пока не поддерживает (только true/false)" };
+  }
+  return {
+    assets: {
+      manifest: session.manifest,
+      config: {
+        html_handling: config.html_handling,
+        not_found_handling: config.not_found_handling,
+        run_worker_first: config.run_worker_first,
+      },
+      binding,
+    },
+    session: sessionId,
+  };
+}
+
+async function parseUpload(request: Request, workerName: string, env: Env): Promise<Parsed> {
   const form = await request.formData();
   const rawMeta = form.get("metadata");
   if (typeof rawMeta !== "string") return { error: "в загрузке нет metadata" };
   const metadata = JSON.parse(rawMeta) as UploadMetadata;
 
-  if (!metadata.main_module) {
+  if (!metadata.main_module && !metadata.assets?.jwt) {
     return { error: "поддерживается только формат ES-модулей (export default { fetch })" };
   }
 
   const vars: Record<string, unknown> = {};
   const durableObjects: DurableObjectBinding[] = [];
+  let assetsBinding: string | undefined;
   for (const b of metadata.bindings ?? []) {
     if (b.type === "plain_text") vars[b.name] = b.text;
+    else if (b.type === "assets") assetsBinding = b.name;
     else if (b.type === "json") vars[b.name] = b.json;
     else if (b.type === "durable_object_namespace") {
       if (b.script_name && b.script_name !== workerName) {
@@ -127,19 +171,28 @@ async function parseUpload(request: Request, workerName: string): Promise<Parsed
     modules.push({ name, type, content: await value.arrayBuffer() });
   }
 
-  if (!modules.some((m) => m.name === metadata.main_module)) {
-    return { error: `главный модуль ${metadata.main_module} не найден в загрузке` };
+  const mainModule = metadata.main_module ?? "";
+  if (mainModule && !modules.some((m) => m.name === mainModule)) {
+    return { error: `главный модуль ${mainModule} не найден в загрузке` };
+  }
+
+  const assets = await parseAssets(metadata, assetsBinding, workerName, env);
+  if (assets && "error" in assets) return assets;
+  if (!mainModule && (durableObjects.length || Object.keys(vars).length)) {
+    return { error: "биндинги без кода воркера (только статика) не имеют смысла — добавь main" };
   }
 
   return {
     meta: {
-      mainModule: metadata.main_module,
+      mainModule,
       compatibilityDate: metadata.compatibility_date ?? "2026-09-01",
       compatibilityFlags: metadata.compatibility_flags ?? [],
       vars,
       durableObjects,
+      ...(assets ? { assets: assets.assets } : {}),
     },
     modules,
+    assetSession: assets?.session ?? null,
   };
 }
 
@@ -147,112 +200,11 @@ async function parseUpload(request: Request, workerName: string): Promise<Parsed
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    // Веб-панель: panel.<ROOT_DOMAIN> (вход по тому же токену, своя сессия в cookie)
-    if (url.hostname === `panel.${env.ROOT_DOMAIN}`) {
-      return handlePanel(request, env);
-    }
-
-    // WebSocket wrangler tail: /tail/<воркер>/<сессия>. Токен wrangler сюда не шлёт,
-    // секрет — сам id сессии, который выдаётся только по токену (POST .../tails).
-    const tailSocket = url.pathname.match(/^\/tail\/([^/]+)\/([0-9a-f-]{36})$/);
-    if (tailSocket) {
-      const [, name, id] = tailSocket;
-      // только заголовки: у upgrade-запроса нет тела, а проброс потока даёт ошибку после 101
-      return tailHub(env, name).fetch(`http://tail/connect?id=${id}`, { headers: request.headers });
-    }
-
-    if (!authorized(request, env)) {
-      return fail(401, 10000, "Authentication error: неверный или отсутствующий токен");
-    }
-
-    // wrangler delete после удаления ищет KV от старого Workers Sites — KV у нас нет
-    if (request.method === "GET" && /^\/client\/v4\/accounts\/[^/]+\/storage\/kv\/namespaces$/.test(url.pathname)) {
-      return Response.json({
-        success: true, errors: [], messages: [], result: [],
-        result_info: { page: 1, per_page: 100, count: 0, total_count: 0 },
-      });
-    }
-
-    const route = url.pathname.match(/^\/client\/v4\/accounts\/[^/]+\/workers\/(.*)$/);
-    if (!route) return fail(404, 7003, `unknown route ${url.pathname}`);
-    const rest = route[1];
-    const method = request.method;
-
-    // Список воркеров (для себя и будущей панели)
-    if (method === "GET" && rest === "scripts") {
-      return ok(await registry(env).list());
-    }
-
-    if (rest === "subdomain") return ok({ subdomain: "ava" });
-
-    const script = rest.match(/^(?:scripts|services|workers)\/([^/]+)(?:\/(.*))?$/);
-    if (!script) return fail(404, 7003, `unknown route ${url.pathname}`);
-    const [, name, sub = ""] = script;
-
-    if (!isValidWorkerName(name)) {
-      return fail(400, 10016, `имя «${name}»: только a-z, 0-9 и дефис, до 63 символов (это поддомен)`);
-    }
-    if (RESERVED_NAMES.has(name)) {
-      return fail(400, 10016, `имя «${name}» занято платформой`);
-    }
-
-    // Загрузка кода: PUT /scripts/:name
-    if (method === "PUT" && rest.startsWith("scripts/") && sub === "") {
-      const parsed = await parseUpload(request, name);
-      if ("error" in parsed) return fail(400, 10021, parsed.error);
-      const version = await registry(env).deploy(name, parsed.meta, parsed.modules);
-      // wrangler показывает deployment_id как UUID без дефисов → кодируем в него номер версии
-      const deploymentId = version.toString(16).padStart(32, "0");
-      return ok({ id: name, etag: deploymentId, deployment_id: deploymentId, has_modules: true });
-    }
-
-    // Удаление: wrangler delete шлёт DELETE /services/:name
-    if (method === "DELETE" && sub === "" && (rest.startsWith("services/") || rest.startsWith("scripts/"))) {
-      const existed = await registry(env).remove(name);
-      return existed ? ok({ id: name }) : fail(404, 10007, `воркер ${name} не найден`);
-    }
-
-    // Состояние воркера. wrangler всегда считает воркер «новым» — так он не
-    // сравнивает конфиг с «дашбордом», которого у нас нет.
-    if (method === "GET" && rest.startsWith("services/") && sub === "") {
-      return fail(404, 10090, "workers.api.error.service_not_found");
-    }
-    if (method === "GET" && rest.startsWith("workers/") && sub === "") {
-      return ok({
-        name,
-        subdomain: { enabled: true, previews_enabled: false },
-        url: `https://${name}.${env.ROOT_DOMAIN}`,
-      });
-    }
-
-    // wrangler tail: создать сессию → WebSocket-адрес, удалить сессию при выходе
-    if (method === "POST" && sub === "tails") {
-      if ((await registry(env).activeVersion(name)) === null) {
-        return fail(404, 10007, `воркер ${name} не найден`);
-      }
-      const session = await tailHub(env, name).createSession();
-      listeners.delete(name);
-      return ok({
-        id: session.id,
-        url: `wss://api.${env.ROOT_DOMAIN}/tail/${name}/${session.id}`,
-        expires_at: session.expiresAt,
-      });
-    }
-    const tailSession = sub.match(/^tails\/([0-9a-f-]{36})$/);
-    if (method === "DELETE" && tailSession) {
-      await tailHub(env, name).deleteSession(tailSession[1]);
-      return ok(null);
-    }
-    if (method === "GET" && sub === "tails") return ok([]);
-
-    if (method === "GET" && sub === "secrets") return ok([]);
-    if (method === "GET" && sub === "deployments") return ok({ deployments: [] });
-    if (sub === "settings") return ok({});
-    if (sub === "subdomain") return ok({ enabled: true, previews_enabled: false });
-
-    return fail(404, 7003, `unknown route ${method} ${url.pathname}`);
+    const response = await route(request, env);
+    // Многие ответы не читают тело (например, POST .../subdomain {"enabled":true}).
+    // Закрываем его явно — иначе workerd пишет в лог «Can't read from request stream».
+    if (request.body && !request.bodyUsed) await request.body.cancel().catch(() => {});
+    return response;
   },
 
   // События загруженных воркеров (gateway передаёт api в `tails` загрузчика)
@@ -270,3 +222,132 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  // Веб-панель: panel.<ROOT_DOMAIN> (вход по тому же токену, своя сессия в cookie)
+  if (url.hostname === `panel.${env.ROOT_DOMAIN}`) {
+    return handlePanel(request, env);
+  }
+
+  // WebSocket wrangler tail: /tail/<воркер>/<сессия>. Токен wrangler сюда не шлёт,
+  // секрет — сам id сессии, который выдаётся только по токену (POST .../tails).
+  const tailSocket = url.pathname.match(/^\/tail\/([^/]+)\/([0-9a-f-]{36})$/);
+  if (tailSocket) {
+    const [, name, id] = tailSocket;
+    // только заголовки: у upgrade-запроса нет тела, а проброс потока даёт ошибку после 101
+    return tailHub(env, name).fetch(`http://tail/connect?id=${id}`, { headers: request.headers });
+  }
+
+  // Загрузка файлов статики: авторизация jwt-сессией (её выдаёт assets-upload-session по токену)
+  if (request.method === "POST" && /^\/client\/v4\/accounts\/[^/]+\/workers\/assets\/upload$/.test(url.pathname)) {
+    const result = await handleAssetUpload(request, registry(env), env.STORAGE);
+    return result.error ? fail(result.status, 10000, result.error) : ok({ jwt: result.jwt });
+  }
+
+  if (!authorized(request, env)) {
+    return fail(401, 10000, "Authentication error: неверный или отсутствующий токен");
+  }
+
+  // wrangler delete после удаления ищет KV от старого Workers Sites — KV у нас нет
+  if (request.method === "GET" && /^\/client\/v4\/accounts\/[^/]+\/storage\/kv\/namespaces$/.test(url.pathname)) {
+    return Response.json({
+      success: true, errors: [], messages: [], result: [],
+      result_info: { page: 1, per_page: 100, count: 0, total_count: 0 },
+    });
+  }
+
+  const route = url.pathname.match(/^\/client\/v4\/accounts\/[^/]+\/workers\/(.*)$/);
+  if (!route) return fail(404, 7003, `unknown route ${url.pathname}`);
+  const rest = route[1];
+  const method = request.method;
+
+  // Список воркеров (для себя и будущей панели)
+  if (method === "GET" && rest === "scripts") {
+    return ok(await registry(env).list());
+  }
+
+  if (rest === "subdomain") return ok({ subdomain: "ava" });
+
+  const script = rest.match(/^(?:scripts|services|workers)\/([^/]+)(?:\/(.*))?$/);
+  if (!script) return fail(404, 7003, `unknown route ${url.pathname}`);
+  const [, name, sub = ""] = script;
+
+  if (!isValidWorkerName(name)) {
+    return fail(400, 10016, `имя «${name}»: только a-z, 0-9 и дефис, до 63 символов (это поддомен)`);
+  }
+  if (RESERVED_NAMES.has(name)) {
+    return fail(400, 10016, `имя «${name}» занято платформой`);
+  }
+
+  // Статика, шаг 1: манифест → какие файлы (по хэшу) ещё не загружены
+  if (method === "POST" && rest.startsWith("scripts/") && sub === "assets-upload-session") {
+    const body = (await request.json().catch(() => null)) as { manifest?: unknown } | null;
+    const manifest = parseManifest(body?.manifest);
+    if ("error" in manifest) return fail(400, 10021, String(manifest.error));
+    const session = await registry(env).startAssetSession(name, manifest);
+    // Всё уже есть на диске → сразу completion-jwt, wrangler пропустит загрузку
+    return ok({
+      jwt: sessionToken(session.missing.length ? "upload" : "complete", session.id),
+      buckets: buckets(session.missing),
+    });
+  }
+
+  // Загрузка кода: PUT /scripts/:name
+  if (method === "PUT" && rest.startsWith("scripts/") && sub === "") {
+    const parsed = await parseUpload(request, name, env);
+    if ("error" in parsed) return fail(400, 10021, parsed.error);
+    const version = await registry(env).deploy(name, parsed.meta, parsed.modules);
+    if (parsed.assetSession) await registry(env).endAssetSession(parsed.assetSession);
+    // wrangler показывает deployment_id как UUID без дефисов → кодируем в него номер версии
+    const deploymentId = version.toString(16).padStart(32, "0");
+    return ok({ id: name, etag: deploymentId, deployment_id: deploymentId, has_modules: true });
+  }
+
+  // Удаление: wrangler delete шлёт DELETE /services/:name
+  if (method === "DELETE" && sub === "" && (rest.startsWith("services/") || rest.startsWith("scripts/"))) {
+    const existed = await registry(env).remove(name);
+    return existed ? ok({ id: name }) : fail(404, 10007, `воркер ${name} не найден`);
+  }
+
+  // Состояние воркера. wrangler всегда считает воркер «новым» — так он не
+  // сравнивает конфиг с «дашбордом», которого у нас нет.
+  if (method === "GET" && rest.startsWith("services/") && sub === "") {
+    return fail(404, 10090, "workers.api.error.service_not_found");
+  }
+  if (method === "GET" && rest.startsWith("workers/") && sub === "") {
+    return ok({
+      name,
+      subdomain: { enabled: true, previews_enabled: false },
+      url: `https://${name}.${env.ROOT_DOMAIN}`,
+    });
+  }
+
+  // wrangler tail: создать сессию → WebSocket-адрес, удалить сессию при выходе
+  if (method === "POST" && sub === "tails") {
+    if ((await registry(env).activeVersion(name)) === null) {
+      return fail(404, 10007, `воркер ${name} не найден`);
+    }
+    const session = await tailHub(env, name).createSession();
+    listeners.delete(name);
+    return ok({
+      id: session.id,
+      url: `wss://api.${env.ROOT_DOMAIN}/tail/${name}/${session.id}`,
+      expires_at: session.expiresAt,
+    });
+  }
+  const tailSession = sub.match(/^tails\/([0-9a-f-]{36})$/);
+  if (method === "DELETE" && tailSession) {
+    await tailHub(env, name).deleteSession(tailSession[1]);
+    return ok(null);
+  }
+  if (method === "GET" && sub === "tails") return ok([]);
+
+  if (method === "GET" && sub === "secrets") return ok([]);
+  if (method === "GET" && sub === "deployments") return ok({ deployments: [] });
+  if (sub === "settings") return ok({});
+  if (sub === "subdomain") return ok({ enabled: true, previews_enabled: false });
+
+  return fail(404, 7003, `unknown route ${method} ${url.pathname}`);
+}
