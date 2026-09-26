@@ -1,5 +1,5 @@
 {
-  "name": "hello",
+  "name": "counter",
   "private": true,
   "type": "module",
   "scripts": {

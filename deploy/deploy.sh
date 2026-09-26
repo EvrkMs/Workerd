@@ -6,8 +6,11 @@
 #   config.capnp
 #   <имя воркера>/index.js
 #
-# Docker-контекст берётся текущий (manager); для локального запуска задай DOCKER_HOST.
+# По умолчанию деплоит на manager независимо от текущего docker context.
+# Локально: DOCKER_CONTEXT=default sh deploy/deploy.sh
 set -e
+export DOCKER_CONTEXT="${DOCKER_CONTEXT:-manager}"
+echo "docker context: $DOCKER_CONTEXT"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/.build/app"
 
@@ -18,7 +21,7 @@ cp "$ROOT/config/config.capnp" "$OUT/"
 for dir in "$ROOT"/workers/*/; do
   name="$(basename "$dir")"
   echo "== $name"
-  (cd "$dir" && npm run typecheck && npm run build)
+  (cd "$dir" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run typecheck && npm run build)
   mkdir -p "$OUT/$name"
   cp "$dir"/dist/* "$OUT/$name/"
 done

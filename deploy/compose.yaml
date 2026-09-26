@@ -25,4 +25,4 @@ volumes:
 networks:
   caddy:
     external: true
-    name: ${CADDY_NETWORK:-caddy}
+    name: caddy
