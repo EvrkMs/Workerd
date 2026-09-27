@@ -2,15 +2,27 @@
 // Им контейнер подписывает внутренние запросы к платформе (события tail, env.ASSETS):
 // контейнер одного воркера не может выдать себя за другой. Меняется вместе с токеном
 // платформы — тогда контейнеры пересоздаются (поколение в метке, см. orchestrator.ts).
-export async function runnerToken(platformToken: string, worker: string): Promise<string> {
+export function runnerToken(platformToken: string, worker: string): Promise<string> {
+  return hmac(platformToken, `runner:${worker}`);
+}
+
+/**
+ * Токен платформы для контейнера (обратное направление): им панель подписывает
+ * служебные запросы в контейнер — просмотр данных Durable Objects.
+ */
+export function adminToken(platformToken: string, worker: string): Promise<string> {
+  return hmac(platformToken, `admin:${worker}`);
+}
+
+async function hmac(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(platformToken),
+    new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
-  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`runner:${worker}`));
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
   return Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 

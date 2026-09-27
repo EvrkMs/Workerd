@@ -13,7 +13,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Registry } from "./registry";
 import { buildBundle, RUNNER_INTERNAL_PORT } from "./runner/bundle";
 import { tar } from "./runner/tar";
-import { runnerToken } from "./runner/token";
+import { adminToken, runnerToken } from "./runner/token";
 
 export interface OrchestratorEnv {
   API_TOKEN?: string;
@@ -42,7 +42,9 @@ export interface RunnerState {
 export type ActivateResult = { ok: true } | { ok: false; error: string };
 
 /** Меняется, когда меняется формат бандла: все контейнеры пересоздаются. */
-const BUNDLE_GEN = "2";
+const BUNDLE_GEN = "4";
+/** Как часто удалять файлы статики, на которые не ссылается ни одна версия. */
+const ASSET_GC_MS = 60 * 60_000;
 const RECONCILE_MS = 15_000;
 const START_TIMEOUT_MS = 20_000;
 /** Сломанную версию сверка не перезапускает чаще, чем раз в RETRY_FAILED_MS. */
@@ -142,8 +144,9 @@ export class Orchestrator extends DurableObject<OrchestratorEnv> {
   private async start(name: string, version: number): Promise<void> {
     const source = await this.registry().runnerSource(version);
     const token = await runnerToken(this.env.API_TOKEN ?? "", name);
+    const admin = await adminToken(this.env.API_TOKEN ?? "", name);
     const bundle = tar(Object.fromEntries(
-      Object.entries(buildBundle(name, token, source)).map(([path, content]) => [`runner/${path}`, content]),
+      Object.entries(buildBundle(name, token, admin, source)).map(([path, content]) => [`runner/${path}`, content]),
     ));
 
     // подкаталог volume для Durable Objects должен существовать до создания контейнера
@@ -240,9 +243,66 @@ export class Orchestrator extends DurableObject<OrchestratorEnv> {
   async alarm(): Promise<void> {
     try {
       await this.reconcile();
+      const lastGc = (await this.ctx.storage.get<number>("asset-gc")) ?? 0;
+      if (Date.now() - lastGc > ASSET_GC_MS) {
+        await this.ctx.storage.put("asset-gc", Date.now());
+        await this.collectAssets();
+      }
     } finally {
       await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     }
+  }
+
+  /**
+   * Удаляет данные Durable Objects: один объект (id) или весь класс. Если класс использует
+   * активная версия, контейнер на это время останавливается (SQLite открыта им) и
+   * запускается снова — несколько секунд простоя.
+   */
+  async deleteDurableData(worker: string, className: string, id: string | null): Promise<void> {
+    await this.serial(worker, async () => {
+      const active = (await this.registry().activeVersions()).find((w) => w.name === worker);
+      const inUse = !!active?.hasCode && (await this.registry().durableClasses(worker)).includes(className);
+      if (inUse) {
+        await this.controller("DELETE", `/runners/${worker}`);
+        await this.registry().setRunnerAddress(worker, null);
+      }
+      try {
+        const dir = `http://storage/workers/${worker}/${worker}-${className}`;
+        if (id === null) {
+          await this.env.STORAGE.fetch(dir, { method: "DELETE" });
+        } else {
+          const listing = await this.env.STORAGE.fetch(dir);
+          const files = listing.ok ? ((await listing.json()) as { name: string; type: string }[]) : [];
+          for (const file of files) {
+            if (file.type === "file" && file.name.startsWith(`${id}.`)) {
+              await this.env.STORAGE.fetch(`${dir}/${file.name}`, { method: "DELETE" });
+            }
+          }
+        }
+      } finally {
+        if (inUse && active) await this.start(worker, active.version);
+      }
+    });
+  }
+
+  /** Файлы статики, на которые не ссылается ни одна версия и ни одна загрузка. */
+  async collectAssets(): Promise<number> {
+    let total = 0;
+    // пачками по 500, не больше 20 пачек за проход — остальное в следующий раз
+    for (let batch = 0; batch < 20; batch++) {
+      const hashes = await this.registry().unusedAssetBlobs(500);
+      if (!hashes.length) break;
+      const removed: string[] = [];
+      for (const hash of hashes) {
+        const response = await this.env.STORAGE.fetch(`http://storage/assets/${hash.slice(0, 2)}/${hash}`, { method: "DELETE" });
+        if (response.ok || response.status === 404) removed.push(hash);
+      }
+      await this.registry().forgetAssetBlobs(removed);
+      total += removed.length;
+      if (removed.length < hashes.length) break; // диск не отдаёт — не крутимся впустую
+    }
+    if (total) console.log(`asset gc: удалено файлов статики: ${total}`);
+    return total;
   }
 
   private async reconcile(): Promise<void> {

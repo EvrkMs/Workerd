@@ -7,16 +7,14 @@
 // Вход по токену платформы (тот же, что у wravler). Cookie — HttpOnly, Secure,
 // SameSite=Strict; изменяющие запросы дополнительно требуют заголовок X-Panel,
 // который чужая страница без CORS отправить не может.
-import { orchestrator, type Orchestrator, type RunnerState } from "./orchestrator";
+import { type DurableEnv, deleteData, deleteLegacy, inspectObject, listNamespaces, listObjects } from "./durable-objects";
+import { orchestrator, type RunnerState } from "./orchestrator";
 import type { Registry } from "./registry";
 import type { TailHub } from "./tail";
 
-interface PanelEnv {
-  API_TOKEN?: string;
+interface PanelEnv extends DurableEnv {
   ROOT_DOMAIN: string;
-  REGISTRY: DurableObjectNamespace<Registry>;
   TAILS: DurableObjectNamespace<TailHub>;
-  ORCHESTRATOR: DurableObjectNamespace<Orchestrator>;
   PANEL_UI: Fetcher;
 }
 
@@ -77,6 +75,31 @@ async function handleApi(request: Request, url: URL, env: PanelEnv): Promise<Res
 
   if (method === "GET" && path === "/workers") {
     return json(await registry.list());
+  }
+
+  // --- Durable Objects (отдельный раздел панели) ---
+  if (path === "/durable-objects" && method === "GET") return json(await listNamespaces(env));
+  if (path === "/durable-objects/legacy" && method === "DELETE") {
+    await deleteLegacy(env);
+    return json({ ok: true });
+  }
+  const durable = path.match(/^\/durable-objects\/([a-z0-9-]{1,63})\/([A-Za-z_$][\w$]*)(?:\/([0-9a-f]{64}))?$/);
+  if (durable) {
+    const [, workerName, className, id = null] = durable;
+    try {
+      if (method === "GET" && id === null) return json(await listObjects(env, workerName, className));
+      if (method === "GET" && id !== null) {
+        const result = await inspectObject(env, workerName, className, id);
+        return json(result.body, result.status);
+      }
+      if (method === "DELETE") {
+        await deleteData(env, workerName, className, id);
+        return json({ ok: true });
+      }
+    } catch (e) {
+      return json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+    return json({ error: "not found" }, 404);
   }
 
   const worker = path.match(/^\/workers\/([a-z0-9-]{1,63})(\/[a-z]+)?$/);

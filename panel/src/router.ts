@@ -3,7 +3,9 @@ import { useEffect, useState } from "react";
 
 export type Route =
   | { page: "list" }
-  | { page: "worker"; name: string; tab: WorkerTab };
+  | { page: "worker"; name: string; tab: WorkerTab }
+  | { page: "durable-objects" }
+  | { page: "namespace"; worker: string; className: string };
 
 export type WorkerTab = "overview" | "versions" | "logs" | "settings";
 
@@ -15,12 +17,24 @@ export function parse(pathname: string): Route {
     const tab = (match[2] ?? "overview") as WorkerTab;
     return { page: "worker", name: match[1], tab: TABS.includes(tab) ? tab : "overview" };
   }
+  const ns = pathname.match(/^\/durable-objects\/([a-z0-9-]+)\/([A-Za-z_$][\w$]*)\/?$/);
+  if (ns) return { page: "namespace", worker: ns[1], className: ns[2] };
+  if (/^\/durable-objects\/?$/.test(pathname)) return { page: "durable-objects" };
   return { page: "list" };
 }
 
 export function href(route: Route): string {
-  if (route.page === "list") return "/";
-  return route.tab === "overview" ? `/workers/${route.name}` : `/workers/${route.name}/${route.tab}`;
+  switch (route.page) {
+    case "list": return "/";
+    case "durable-objects": return "/durable-objects";
+    case "namespace": return `/durable-objects/${route.worker}/${route.className}`;
+    case "worker": return route.tab === "overview" ? `/workers/${route.name}` : `/workers/${route.name}/${route.tab}`;
+  }
+}
+
+/** Раздел панели для переключателя в шапке. */
+export function section(route: Route): "workers" | "durable-objects" {
+  return route.page === "durable-objects" || route.page === "namespace" ? "durable-objects" : "workers";
 }
 
 export function navigate(to: string) {

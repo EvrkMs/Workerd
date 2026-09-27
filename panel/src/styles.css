@@ -299,6 +299,23 @@ p { margin: 0; }
 
 .note { padding: 10px 14px; border-radius: 9px; font-size: 13.5px; }
 .note-error { background: var(--red-soft); color: var(--red); }
+.note-warning { background: var(--amber-soft); color: var(--amber); }
+
+/* --- Durable Objects ------------------------------------------------------------------ */
+
+.topbar .tabs { flex-shrink: 0; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.row-link { cursor: pointer; }
+.row-link:hover td { background: var(--hover); }
+.row-link.selected td { background: var(--accent-soft); }
+.row-sub { margin-top: 4px; }
+.cell-menu { width: 1%; text-align: right; }
+.cell-menu > * { display: inline-flex; vertical-align: middle; }
+.object-data { display: grid; gap: 12px; }
+.object-data h3 { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
+.table-scroll { overflow-x: auto; border-radius: 8px; box-shadow: 0 0 0 1px var(--line); }
+.data-table th, .data-table td { padding: 6px 12px; vertical-align: top; }
+.data-table code.value { white-space: pre-wrap; word-break: break-word; }
 .empty { padding: 28px 16px; text-align: center; color: var(--subtle); }
 .skeleton-list { display: grid; gap: 12px; }
 .skeleton { height: 72px; border-radius: var(--radius); background: linear-gradient(90deg, var(--recessed), var(--hover), var(--recessed)); background-size: 200% 100%; animation: shimmer 1.2s infinite; }

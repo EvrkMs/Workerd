@@ -45,6 +45,31 @@ export interface VersionSummary {
   assetFiles: number;
 }
 
+/** Класс Durable Object на диске: /data/workers/<worker>/<worker>-<className>. */
+export interface NamespaceSummary {
+  worker: string;
+  className: string;
+  binding: string | null;
+  /** active — используется активной версией; иначе данные «осиротели». */
+  status: "active" | "worker-deleted" | "class-unused";
+  objects: number;
+  size: number;
+  modified: string | null;
+}
+
+export interface ObjectSummary {
+  id: string;
+  size: number;
+  modified: string | null;
+}
+
+export interface ObjectData {
+  kv: { key: string; value: string }[];
+  kvTotal: number;
+  tables: { name: string; columns: string[]; rows: string[][]; total: number }[];
+  alarm: number | null;
+}
+
 export interface Session {
   authenticated: boolean;
   rootDomain: string;
@@ -98,4 +123,13 @@ export const api = {
     request<{ ok: true; version: number }>("DELETE", `/workers/${name}/secrets?name=${encodeURIComponent(secret)}`),
   startTail: (name: string) => request<{ id: string; url: string }>("POST", `/workers/${name}/tail`),
   stopTail: (name: string, id: string) => request<{ ok: true }>("DELETE", `/workers/${name}/tail?id=${id}`),
+
+  durableObjects: () =>
+    request<{ namespaces: NamespaceSummary[]; legacy: { files: number; size: number } | null }>("GET", "/durable-objects"),
+  objects: (worker: string, cls: string) => request<ObjectSummary[]>("GET", `/durable-objects/${worker}/${cls}`),
+  object: (worker: string, cls: string, id: string) => request<ObjectData>("GET", `/durable-objects/${worker}/${cls}/${id}`),
+  deleteObject: (worker: string, cls: string, id: string) =>
+    request<{ ok: true }>("DELETE", `/durable-objects/${worker}/${cls}/${id}`),
+  deleteNamespace: (worker: string, cls: string) => request<{ ok: true }>("DELETE", `/durable-objects/${worker}/${cls}`),
+  deleteLegacy: () => request<{ ok: true }>("DELETE", "/durable-objects/legacy"),
 };

@@ -491,6 +491,46 @@ export class Registry extends DurableObject<object> {
     this.sql.exec("DELETE FROM asset_sessions WHERE id = ?", id);
   }
 
+  /**
+   * Файлы статики, на которые не ссылается ни одна версия (включая старые — к ним можно
+   * откатиться) и ни одна загрузка в процессе. Остались от удалённых воркеров.
+   */
+  unusedAssetBlobs(limit: number): string[] {
+    return this.sql
+      .exec<{ hash: string }>(
+        `SELECT hash FROM asset_blobs
+         WHERE hash NOT IN (SELECT j.value FROM versions v, json_each(v.meta, '$.assets.manifest') j)
+           AND hash NOT IN (SELECT j.value FROM asset_sessions s, json_each(s.manifest) j)
+         LIMIT ?`,
+        limit,
+      )
+      .toArray()
+      .map((r) => r.hash);
+  }
+
+  forgetAssetBlobs(hashes: string[]): void {
+    if (!hashes.length) return;
+    this.sql.exec("DELETE FROM asset_blobs WHERE hash IN (SELECT value FROM json_each(?))", JSON.stringify(hashes));
+  }
+
+  // --- Durable Objects ------------------------------------------------------------------
+
+  /** Классы DO активной версии воркера. */
+  durableClasses(name: string): string[] {
+    return (this.activeMeta(name)?.durableObjects ?? []).map((d) => d.className);
+  }
+
+  /** Все воркеры и классы DO их активных версий — для списка DO в панели. */
+  durableBindings(): Record<string, DurableObjectBinding[]> {
+    const out: Record<string, DurableObjectBinding[]> = {};
+    for (const row of this.sql.exec<{ name: string; meta: string }>(
+      "SELECT w.name, v.meta FROM workers w JOIN versions v ON v.id = w.active_version",
+    )) {
+      out[row.name] = (JSON.parse(row.meta) as WorkerMeta).durableObjects ?? [];
+    }
+    return out;
+  }
+
   list(): WorkerSummary[] {
     return this.sql
       .exec<SummaryRow>(`${SUMMARY_SQL} ORDER BY w.name`)

@@ -68,6 +68,8 @@ export class Internal extends WorkerEntrypoint<Env> {
       const service = path.match(/^\/([^/]+)(\/.*)?$/);
       if (!service || !isValidWorkerName(service[1])) return new Response("not found", { status: 404 });
       const [, target, rest = "/"] = service;
+      // служебные пути цели (просмотр данных DO и т.п.) другим воркерам недоступны
+      if (rest.startsWith("/__platform/")) return new Response("forbidden", { status: 403 });
       return this.service(worker, target, `${rest}${url.search}`, request, headers);
     }
 

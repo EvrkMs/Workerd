@@ -123,17 +123,27 @@ export function Menu({ items }: { items: { label: string; icon?: IconName; dange
 
 // --- подтверждение удаления: нужно ввести имя ----------------------------------------------
 
-export function ConfirmDelete({ name, onCancel, onConfirm }: { name: string; onCancel: () => void; onConfirm: () => Promise<void> }) {
+export function ConfirmDelete({ name, title = "Удалить воркер?", children, onCancel, onConfirm }: {
+  /** Что нужно ввести для подтверждения. */
+  name: string;
+  title?: string;
+  /** Описание последствий; по умолчанию — про удаление воркера. */
+  children?: ReactNode;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   return (
     <div className="dialog-backdrop" onMouseDown={onCancel}>
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onMouseDown={(e) => e.stopPropagation()}>
-        <h2 id="confirm-title">Удалить воркер?</h2>
+        <h2 id="confirm-title">{title}</h2>
         <p className="muted">
-          Воркер <code>{name}</code> будет удалён со всеми версиями, его адрес перестанет отвечать.
-          Данные Durable Objects и файлы статики на диске останутся.
+          {children ?? <>
+            Воркер <code>{name}</code> будет удалён со всеми версиями, его адрес перестанет отвечать.
+            Данные Durable Objects на диске останутся — их можно удалить в разделе «Durable Objects».
+          </>}
         </p>
         <label className="field">
           <span>Введите <code>{name}</code> для подтверждения</span>

@@ -69,8 +69,11 @@ services:
     image: workerd-egress:local
     restart: unless-stopped
     networks:
-      - workerd_internal     # сюда приходят запросы от workerd
-      - egress               # отсюда — наружу
+      workerd_internal:      # сюда приходят запросы от платформы и контейнеров воркеров
+        # Постоянный адрес: workerd разрешает адрес external-сервиса ("egress:8080") один
+        # раз при старте. Пересозданный egress на новом IP оставил бы всех без интернета.
+        ipv4_address: "${EGRESS_IP:-10.0.3.251}"
+      egress:                # отсюда — наружу
 
   # Бэкап /data: согласованные снимки SQLite раз в BACKUP_INTERVAL_HOURS, последние BACKUP_KEEP
   backup:

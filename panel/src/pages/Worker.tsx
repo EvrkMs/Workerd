@@ -136,7 +136,13 @@ function Overview({ worker: w, versions, url }: { worker: WorkerDetail; versions
 
 function Bindings({ worker: w }: { worker: WorkerDetail }) {
   const rows = [
-    ...w.durableObjectsList.map((d) => ({ name: d.binding, kind: "Durable Object", value: d.className, icon: "box" as const })),
+    ...w.durableObjectsList.map((d) => ({
+      name: d.binding,
+      kind: "Durable Object",
+      value: d.className,
+      icon: "box" as const,
+      to: href({ page: "namespace", worker: w.name, className: d.className }),
+    })),
     ...w.servicesList.map((s) => ({
       name: s.binding,
       kind: "Воркер",
@@ -165,7 +171,11 @@ function Bindings({ worker: w }: { worker: WorkerDetail }) {
           <tr key={`${r.kind}:${r.name}`}>
             <td><span className="cell-icon"><Icon name={r.icon} size={14} /><code>{r.name}</code></span></td>
             <td className="muted nowrap hide-sm">{r.kind}</td>
-            <td className="truncate-cell"><span title={r.value}>{r.value}</span></td>
+            <td className="truncate-cell">
+              {"to" in r && r.to
+                ? <a {...linkProps(r.to)} title="Объекты и данные">{r.value}</a>
+                : <span title={r.value}>{r.value}</span>}
+            </td>
           </tr>
         ))}
       </tbody>

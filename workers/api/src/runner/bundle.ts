@@ -28,7 +28,16 @@ function str(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-export function buildBundle(worker: string, token: string, src: RunnerSource): Record<string, Uint8Array | string> {
+/**
+ * token — токен контейнера (его запросы к платформе), admin — токен платформы
+ * (её запросы в контейнер: просмотр данных DO из панели).
+ */
+export function buildBundle(
+  worker: string,
+  token: string,
+  admin: string,
+  src: RunnerSource,
+): Record<string, Uint8Array | string> {
   const files: Record<string, Uint8Array | string> = {};
   const workerModules: string[] = [];
 
@@ -87,7 +96,11 @@ export function buildBundle(worker: string, token: string, src: RunnerSource): R
     services.push(`(name = ${str(`__svc_${target}`)}, worker = .svc${i})`);
     extraWorkers.push(platformWorker(`svc${i}`, "p/service.js", worker, token, `(name = "TARGET", text = ${str(target)}),`));
   });
-  files["b/platform.json"] = JSON.stringify({ services: serviceEntrypoints });
+  files["b/platform.json"] = JSON.stringify({
+    services: serviceEntrypoints,
+    admin,
+    doBindings: Object.fromEntries(src.durableObjects.map((d) => [d.className, d.binding])),
+  });
   bindings.push(`(name = "__PLATFORM", json = embed "b/platform.json")`);
 
   let assetsWorker = "";
