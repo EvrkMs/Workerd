@@ -1,0 +1,14 @@
+# Внутренний воркер: адреса нет (workers_dev = false), до него достаёт только
+# example-gateway через service binding. RPC-методы + именованный entrypoint Admin.
+name = "example-backend"
+main = "index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "Counter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Counter"]

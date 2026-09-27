@@ -1,15 +1,12 @@
 // Живые логи воркеров для `wravler tail`.
 //
-// gateway передаёт api-воркер в `tails` при загрузке каждого воркера → workerd вызывает
-// tail() у api с событиями (TraceItem). api раскладывает их по TailHub — один DO на воркер,
-// который держит WebSocket-сессии wrangler и рассылает им события как есть (протокол trace-v1).
+// gateway при загрузке каждого воркера передаёт в `tails` свой TailForwarder (с именем
+// воркера) → события (TraceItem) в JSON → api TailIngest.publish() → TailHub — один DO
+// на воркер, который держит WebSocket-сессии wrangler и рассылает им события (протокол trace-v1).
 import { DurableObject } from "cloudflare:workers";
 
 /** Сколько живёт сессия, если wrangler не закрыл её сам. */
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-
-/** Заголовки посетителей, которые не должны попадать в логи. */
-const REDACTED_HEADERS = ["authorization", "cookie", "set-cookie", "proxy-authorization"];
 
 export class TailHub extends DurableObject<object> {
   /** Создаёт сессию; её id — секрет в WebSocket-адресе (wrangler не шлёт на WS токен). */
@@ -74,28 +71,4 @@ export class TailHub extends DurableObject<object> {
       // сокет уже закрыт
     }
   }
-}
-
-/** Имя воркера по событию: scriptName у загруженных воркеров пустой, берём из хоста. */
-export function workerFromEvent(event: TraceItem, rootDomain: string): string | null {
-  if (event.scriptName) return event.scriptName;
-  const request = (event.event as TraceItemFetchEventInfo | null)?.request;
-  if (!request) return null;
-  const host = new URL(request.url).hostname;
-  const suffix = `.${rootDomain}`;
-  return host.endsWith(suffix) ? host.slice(0, -suffix.length) : null;
-}
-
-/** Событие в JSON для wrangler, без секретных заголовков посетителя. */
-export function serializeEvent(event: TraceItem): string {
-  return JSON.stringify(event, (key, value) =>
-    key === "headers" && value && typeof value === "object"
-      ? Object.fromEntries(
-          Object.entries(value as Record<string, string>).map(([k, v]) => [
-            k,
-            REDACTED_HEADERS.includes(k.toLowerCase()) ? "REDACTED" : v,
-          ]),
-        )
-      : value,
-  );
 }

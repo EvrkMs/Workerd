@@ -1,9 +1,12 @@
 // API платформы в формате Cloudflare API (/client/v4) — ровно то подмножество,
 // которое нужно `wravler deploy` / `wravler delete` / `wravler tail`.
 // Код воркеров хранится в реестре (DO), живые логи идут через TailHub (DO).
-import type { AssetConfig, DurableObjectBinding, ModuleType, UploadedModule, VersionAssets, WorkerMeta } from "./registry";
+import { WorkerEntrypoint } from "cloudflare:workers";
+import type {
+  AssetConfig, DurableObjectBinding, ModuleType, ServiceBinding, UploadedModule, VersionAssets, WorkerMeta,
+} from "./registry";
 import { Registry } from "./registry";
-import { TailHub, serializeEvent, workerFromEvent } from "./tail";
+import { TailHub } from "./tail";
 import { handlePanel } from "./panel";
 import { RESERVED_NAMES, isValidWorkerName } from "./names";
 import { buckets, handleAssetUpload, parseManifest, parseSessionToken, sessionToken } from "./assets";
@@ -78,7 +81,16 @@ interface UploadMetadata {
   body_part?: string;
   compatibility_date?: string;
   compatibility_flags?: string[];
-  bindings?: { name: string; type: string; text?: string; json?: unknown; class_name?: string; script_name?: string }[];
+  bindings?: {
+    name: string;
+    type: string;
+    text?: string;
+    json?: unknown;
+    class_name?: string;
+    script_name?: string;
+    service?: string;
+    entrypoint?: string;
+  }[];
   migrations?: {
     steps?: {
       renamed_classes?: unknown[];
@@ -155,9 +167,10 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
   const vars: Record<string, unknown> = {};
   const secrets: Record<string, string> = {};
   const durableObjects: DurableObjectBinding[] = [];
+  const services: ServiceBinding[] = [];
   let assetsBinding: string | undefined;
   for (const b of metadata.bindings ?? []) {
-    // имена "__…" заняты служебными биндингами платформы (__DO_…, __ALARMS)
+    // имена "__…" заняты служебными биндингами платформы (__DO_…, __SVC_…, __ALARMS)
     if (b.name.startsWith("__")) return { error: `имя биндинга ${b.name}: префикс "__" занят платформой` };
     if (b.type === "plain_text") vars[b.name] = b.text;
     else if (b.type === "secret_text") secrets[b.name] = b.text ?? ""; // wrangler deploy --secrets-file
@@ -171,6 +184,19 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
         return { error: `биндинг ${b.name}: некорректное имя класса DO` };
       }
       durableObjects.push({ binding: b.name, className: b.class_name });
+    } else if (b.type === "service") {
+      // Цель может ещё не существовать: воркеры деплоятся в любом порядке, ошибка — при вызове
+      if (!b.service || !isValidWorkerName(b.service) || RESERVED_NAMES.has(b.service)) {
+        return { error: `биндинг ${b.name}: некорректное имя воркера «${b.service ?? ""}»` };
+      }
+      if (b.entrypoint !== undefined && (!/^[A-Za-z_$][\w$]*$/.test(b.entrypoint) || b.entrypoint.startsWith("__"))) {
+        return { error: `биндинг ${b.name}: некорректное имя entrypoint «${b.entrypoint}»` };
+      }
+      services.push({
+        binding: b.name,
+        service: b.service,
+        ...(b.entrypoint && b.entrypoint !== "default" ? { entrypoint: b.entrypoint } : {}),
+      });
     } else return { error: `биндинг ${b.name} (${b.type}) платформа пока не поддерживает` };
   }
 
@@ -200,7 +226,7 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
 
   const assets = await parseAssets(metadata, assetsBinding, workerName, env);
   if (assets && "error" in assets) return assets;
-  if (!mainModule && (durableObjects.length || Object.keys(vars).length)) {
+  if (!mainModule && (durableObjects.length || services.length || Object.keys(vars).length)) {
     return { error: "биндинги без кода воркера (только статика) не имеют смысла — добавь main" };
   }
 
@@ -211,6 +237,7 @@ async function parseUpload(request: Request, workerName: string, env: Env): Prom
       compatibilityFlags: metadata.compatibility_flags ?? [],
       vars,
       durableObjects,
+      ...(services.length ? { services } : {}),
       ...(Object.keys(secrets).length ? { secrets } : {}),
       ...(metadata.annotations?.["workers/message"] ? { message: metadata.annotations["workers/message"] } : {}),
       ...(assets ? { assets: assets.assets } : {}),
@@ -230,22 +257,19 @@ export default {
     if (request.body && !request.bodyUsed) await request.body.cancel().catch(() => {});
     return response;
   },
-
-  // События загруженных воркеров (gateway передаёт api в `tails` загрузчика)
-  async tail(events, env) {
-    const byWorker = new Map<string, string[]>();
-    for (const event of events) {
-      const name = workerFromEvent(event, env.ROOT_DOMAIN);
-      if (!name) continue;
-      const list = byWorker.get(name) ?? [];
-      list.push(serializeEvent(event));
-      byWorker.set(name, list);
-    }
-    for (const [name, messages] of byWorker) {
-      if (await hasListeners(env, name)) await tailHub(env, name).publish(messages);
-    }
-  },
 } satisfies ExportedHandler<Env>;
+
+/**
+ * События загруженных воркеров. У каждого воркера свой tail-обработчик в gateway
+ * (TailForwarder с именем воркера в props) — так события без URL (RPC, Durable
+ * Objects, вызовы через service binding) тоже попадают к нужному воркеру.
+ */
+export class TailIngest extends WorkerEntrypoint<Env> {
+  async publish(worker: string, messages: string[]): Promise<void> {
+    if (!isValidWorkerName(worker) || !messages.length) return;
+    if (await hasListeners(this.env, worker)) await tailHub(this.env, worker).publish(messages);
+  }
+}
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -346,9 +370,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     return fail(404, 10090, "workers.api.error.service_not_found");
   }
   if (method === "GET" && rest.startsWith("workers/") && sub === "") {
+    const route = await registry(env).route(name);
     return ok({
       name,
-      subdomain: { enabled: true, previews_enabled: false },
+      subdomain: { enabled: route?.public ?? true, previews_enabled: false },
       url: `https://${name}.${env.ROOT_DOMAIN}`,
     });
   }
@@ -397,7 +422,19 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (method === "GET" && sub === "deployments") return ok({ deployments: [] });
   if (sub === "settings") return ok({});
-  if (sub === "subdomain") return ok({ enabled: true, previews_enabled: false });
+
+  // workers_dev: wrangler после деплоя шлёт POST {"enabled": true|false}.
+  // false — у воркера нет адреса <имя>.<домен>, до него достают только service bindings.
+  if (sub === "subdomain") {
+    if (method === "POST") {
+      const body = (await request.json().catch(() => null)) as { enabled?: boolean } | null;
+      const enabled = body?.enabled !== false;
+      if (!(await registry(env).setPublic(name, enabled))) return fail(404, 10007, `воркер ${name} не найден`);
+      return ok({ enabled, previews_enabled: false });
+    }
+    const route = await registry(env).route(name);
+    return ok({ enabled: route?.public ?? true, previews_enabled: false });
+  }
 
   return fail(404, 7003, `unknown route ${method} ${url.pathname}`);
 }

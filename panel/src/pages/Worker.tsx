@@ -33,9 +33,11 @@ export function Worker({ name, tab, rootDomain }: { name: string; tab: WorkerTab
             </a>
           ))}
         </div>
-        <a className="btn btn-primary" href={url} target="_blank" rel="noreferrer">
-          <Icon name="globe" /> <span className="hide-sm">Открыть</span> <Icon name="external" size={12} />
-        </a>
+        {worker.data?.public !== false && (
+          <a className="btn btn-primary" href={url} target="_blank" rel="noreferrer">
+            <Icon name="globe" /> <span className="hide-sm">Открыть</span> <Icon name="external" size={12} />
+          </a>
+        )}
       </nav>
 
       <main className="page">
@@ -60,8 +62,17 @@ function Overview({ worker: w, versions, url }: { worker: WorkerDetail; versions
   return (
     <>
       <div className="status-bar">
-        <Icon name="globe" size={18} />
-        <a href={url} target="_blank" rel="noreferrer">{url.replace("https://", "")}</a>
+        {w.public ? (
+          <>
+            <Icon name="globe" size={18} />
+            <a href={url} target="_blank" rel="noreferrer">{url.replace("https://", "")}</a>
+          </>
+        ) : (
+          <>
+            <Icon name="lock" size={18} />
+            <span>Закрытый воркер: адреса нет, вызывается только из других воркеров</span>
+          </>
+        )}
         <span className="grow" />
         <span className="muted nowrap">v{w.version} · обновлён <TimeAgo iso={w.updatedAt} /></span>
       </div>
@@ -85,7 +96,9 @@ function Overview({ worker: w, versions, url }: { worker: WorkerDetail; versions
           <Card title="Домены">
             <dl className="fields">
               <dt>Адрес</dt>
-              <dd><span className="truncate">{url.replace("https://", "")}</span><CopyButton text={url} /></dd>
+              {w.public
+                ? <dd><span className="truncate">{url.replace("https://", "")}</span><CopyButton text={url} /></dd>
+                : <dd className="muted">нет (workers_dev = false)</dd>}
             </dl>
           </Card>
           <Card title="Сведения">
@@ -113,6 +126,12 @@ function Overview({ worker: w, versions, url }: { worker: WorkerDetail; versions
 function Bindings({ worker: w }: { worker: WorkerDetail }) {
   const rows = [
     ...w.durableObjectsList.map((d) => ({ name: d.binding, kind: "Durable Object", value: d.className, icon: "box" as const })),
+    ...w.servicesList.map((s) => ({
+      name: s.binding,
+      kind: "Воркер",
+      value: s.entrypoint ? `${s.service} · ${s.entrypoint}` : s.service,
+      icon: "link" as const,
+    })),
     ...(w.assets
       ? [{
           name: w.assets.binding ?? "—",

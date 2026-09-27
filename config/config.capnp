@@ -44,6 +44,8 @@ const gatewayWorker :Workerd.Worker = (
   bindings = [
     (name = "ROOT_DOMAIN", fromEnvironment = "ROOT_DOMAIN"),  # из deploy/.env
     (name = "API", service = "api"),
+    # события загруженных воркеров → wravler tail (TailForwarder в gateway → api)
+    (name = "TAIL", service = (name = "api", entrypoint = "TailIngest")),
     (name = "LOADER", workerLoader = ()),
     (name = "REGISTRY", durableObjectNamespace = (className = "Registry", serviceName = "api")),
     (name = "HOST", durableObjectNamespace = "Host"),

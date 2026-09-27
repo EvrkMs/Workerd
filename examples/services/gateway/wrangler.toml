@@ -1,0 +1,14 @@
+# API gateway: единственный публичный вход, остальное — внутренние воркеры.
+# https://example-gateway.<ROOT_DOMAIN>/{rpc,hit,admin,backend/...}
+name = "example-gateway"
+main = "index.ts"
+compatibility_date = "2026-09-01"
+
+[[services]]
+binding = "BACKEND"
+service = "example-backend"
+
+[[services]]
+binding = "ADMIN"
+service = "example-backend"
+entrypoint = "Admin"

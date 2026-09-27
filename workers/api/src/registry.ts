@@ -16,6 +16,16 @@ export interface DurableObjectBinding {
   className: string;
 }
 
+/**
+ * Биндинг другого воркера ([[services]] в wrangler.toml): env[binding] → воркер service,
+ * его default-экспорт или именованный entrypoint. Вызов идёт в активную версию цели.
+ */
+export interface ServiceBinding {
+  binding: string;
+  service: string;
+  entrypoint?: string;
+}
+
 /** Настройки статики из wrangler.toml [assets]. */
 export interface AssetConfig {
   html_handling?: "auto-trailing-slash" | "force-trailing-slash" | "drop-trailing-slash" | "none";
@@ -44,6 +54,8 @@ export interface WorkerMeta {
   vars: Record<string, unknown>;
   /** Нет в версиях, загруженных до поддержки DO. */
   durableObjects?: DurableObjectBinding[];
+  /** Нет в версиях, загруженных до поддержки service bindings. */
+  services?: ServiceBinding[];
   assets?: VersionAssets;
   /** Секреты: имя → значение. Наружу отдаются только имена. Наследуются при деплое. */
   secrets?: Record<string, string>;
@@ -61,8 +73,11 @@ export interface WorkerSummary {
   hasCode: boolean;
   assetFiles: number;
   durableObjects: number;
+  services: number;
   vars: number;
   secrets: number;
+  /** false — у воркера нет адреса <имя>.<домен> (workers_dev = false), только вызовы из других воркеров. */
+  public: boolean;
 }
 
 export interface VersionSummary {
@@ -83,6 +98,7 @@ export interface WorkerDetail extends WorkerSummary {
   /** Только имена — значения секретов из реестра не выходят. */
   secretsList: string[];
   durableObjectsList: DurableObjectBinding[];
+  servicesList: ServiceBinding[];
   assets: { files: number; binding: string | null; config: AssetConfig } | null;
   modules: { name: string; type: ModuleType; size: number }[];
 }
@@ -95,6 +111,7 @@ export interface VersionCode {
   modules: Record<string, { js: string } | { cjs: string } | { text: string } | { json: unknown } | { data: ArrayBuffer } | { wasm: ArrayBuffer }>;
   env: Record<string, unknown>;
   durableObjects: DurableObjectBinding[];
+  services: ServiceBinding[];
   /** Имя биндинга статики (env.ASSETS), если он объявлен. */
   assetsBinding: string | null;
 }
@@ -121,11 +138,12 @@ type SummaryRow = {
   versions: number;
   created_at: string;
   updated_at: string;
+  public: number;
   meta: string;
 };
 
 const SUMMARY_SQL = `
-  SELECT w.name, w.active_version, w.created_at, w.updated_at, v.meta,
+  SELECT w.name, w.active_version, w.created_at, w.updated_at, w.public, v.meta,
          (SELECT count(*) FROM versions x WHERE x.worker = w.name) AS versions
   FROM workers w JOIN versions v ON v.id = w.active_version`;
 
@@ -140,8 +158,10 @@ function toSummary(r: SummaryRow): WorkerSummary {
     hasCode: meta.mainModule !== "",
     assetFiles: meta.assets ? Object.keys(meta.assets.manifest).length : 0,
     durableObjects: meta.durableObjects?.length ?? 0,
+    services: meta.services?.length ?? 0,
     vars: Object.keys(meta.vars).length,
     secrets: Object.keys(meta.secrets ?? {}).length,
+    public: r.public !== 0,
   };
 }
 
@@ -188,6 +208,11 @@ export class Registry extends DurableObject<object> {
           expires_at INTEGER NOT NULL
         );
       `);
+      // workers_dev: колонка появилась позже — в старой базе её добавляем
+      const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(workers)").toArray();
+      if (!columns.some((c) => c.name === "public")) {
+        this.sql.exec("ALTER TABLE workers ADD COLUMN public INTEGER NOT NULL DEFAULT 1");
+      }
     });
   }
 
@@ -304,6 +329,19 @@ export class Registry extends DurableObject<object> {
     return row?.active_version ?? null;
   }
 
+  /** Для gateway: активная версия и открыт ли адрес <имя>.<домен>; null — воркера нет. */
+  route(name: string): { version: number; public: boolean } | null {
+    const row = this.sql
+      .exec<{ active_version: number; public: number }>("SELECT active_version, public FROM workers WHERE name = ?", name)
+      .toArray()[0];
+    return row ? { version: row.active_version, public: row.public !== 0 } : null;
+  }
+
+  /** workers_dev в wrangler.toml (wrangler шлёт после каждого деплоя). false — воркер только для биндингов. */
+  setPublic(name: string, enabled: boolean): boolean {
+    return this.sql.exec("UPDATE workers SET public = ? WHERE name = ?", enabled ? 1 : 0, name).rowsWritten > 0;
+  }
+
   code(version: number): VersionCode {
     const row = this.sql
       .exec<{ meta: string }>("SELECT meta FROM versions WHERE id = ?", version)
@@ -334,6 +372,7 @@ export class Registry extends DurableObject<object> {
       modules,
       env: { ...meta.vars, ...meta.secrets },
       durableObjects: meta.durableObjects ?? [],
+      services: meta.services ?? [],
       assetsBinding: meta.assets?.binding ?? null,
     };
   }
@@ -450,6 +489,7 @@ export class Registry extends DurableObject<object> {
         value: typeof value === "string" ? value : JSON.stringify(value),
       })),
       durableObjectsList: meta.durableObjects ?? [],
+      servicesList: meta.services ?? [],
       assets: meta.assets
         ? {
             files: Object.keys(meta.assets.manifest).length,

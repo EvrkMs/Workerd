@@ -87,16 +87,22 @@ function WorkerRow({ worker: w, rootDomain, onDelete }: { worker: WorkerSummary;
         <span className="worker-icon"><Icon name="worker" size={18} /></span>
         <div className="worker-card-title">
           <span className="worker-name">{w.name}</span>
-          <a className="worker-url" href={url} target="_blank" rel="noreferrer">{url.replace("https://", "")}</a>
+          {w.public
+            ? <a className="worker-url" href={url} target="_blank" rel="noreferrer">{url.replace("https://", "")}</a>
+            : <span className="worker-url muted">только для других воркеров</span>}
         </div>
         <div className="worker-badges">
+          {!w.public && <Badge>Закрытый</Badge>}
+          {w.services > 0 && <Badge tone="blue">Воркеры</Badge>}
           {w.durableObjects > 0 && <Badge tone="blue">Durable Objects</Badge>}
           {w.assetFiles > 0 && <Badge tone="green">Статика</Badge>}
           {!w.hasCode && <Badge>Без кода</Badge>}
         </div>
         <span className="muted nowrap"><TimeAgo iso={w.updatedAt} /></span>
         <Menu items={[
-          { label: "Открыть сайт", icon: "external", onSelect: () => window.open(url, "_blank", "noreferrer") },
+          ...(w.public
+            ? [{ label: "Открыть сайт", icon: "external" as const, onSelect: () => window.open(url, "_blank", "noreferrer") }]
+            : []),
           { label: "Версии", icon: "history", onSelect: () => navigate(href({ page: "worker", name: w.name, tab: "versions" })) },
           { label: "Логи", icon: "file", onSelect: () => navigate(href({ page: "worker", name: w.name, tab: "logs" })) },
           { label: "Удалить", icon: "trash", danger: true, onSelect: onDelete },

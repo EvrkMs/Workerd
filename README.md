@@ -11,8 +11,8 @@ wravler deploy ──> api.workers.ava-kk.ru (воркер api, формат Clo
 
 запрос <имя>.workers.ava-kk.ru ──> gateway ──> реестр: активная версия <имя>
                                      └─> Worker Loader: LOADER.get("<имя>@<версия>", код) → fetch
-                                              │ console.*, исключения, запросы (tails)
-wravler tail ──WebSocket──> TailHub (DO на воркер) <──── api.tail()
+                                              │ console.*, исключения, запросы, RPC (tails)
+wravler tail ──WebSocket──> TailHub (DO на воркер) <──── TailForwarder → api TailIngest
 ```
 
 - **`config.capnp` статичный.** При деплое воркеров он не меняется, workerd не перезапускается, остальные воркеры не затрагиваются.
@@ -34,7 +34,9 @@ wravler tail ──WebSocket──> TailHub (DO на воркер) <────
 | DO другого воркера (`script_name`), миграции `renamed_classes` / `transferred_classes` | ❌ деплой отклоняется |
 | Статика `[assets]`: с кодом и без, `env.ASSETS`, `404-page`, SPA | ✅ см. раздел «Статика» |
 | `run_worker_first` со списком путей | ❌ деплой отклоняется (true/false поддерживается) |
-| Service bindings, KV, D1, R2 | ❌ деплой отклоняется с понятной ошибкой |
+| Service bindings `[[services]]`: `fetch`, RPC, именованные `entrypoint` | ✅ см. раздел «Service bindings» |
+| `workers_dev = false` (воркер без адреса, только для других воркеров) | ✅ |
+| KV, D1, R2, Queues | ❌ деплой отклоняется с понятной ошибкой |
 
 ## Структура
 
@@ -45,7 +47,8 @@ config/      config.capnp (платформа), egress.capnp (выход в ин
 backup/      образ бэкапа /data (sqlite3 + ротация)
 workers/     воркеры платформы
   gateway/   <имя>.<ROOT_DOMAIN> → статика или воркер из реестра через Worker Loader
-             src/loader.ts — загрузка, shim.ts — прослойка env, durable.ts — DO, assets.ts — статика
+             src/loader.ts — загрузка, shim.ts — прослойка env, durable.ts — DO, assets.ts — статика,
+             services.ts — service bindings, tail.ts — события воркеров для tail
   api/       API для wravler, реестр (src/registry.ts), статика (src/assets.ts), панель, tail
 panel/       веб-панель: React + Vite, собирается в образ платформы
 tools/
@@ -55,6 +58,7 @@ examples/    воркеры для проверки, деплоятся чере
   hello/
   counter/   Durable Object на SQLite: счётчик обращений по пути
   site/      статика + код: страницы из public/, /api/time, env.ASSETS, 404.html
+  services/  API gateway + закрытый backend: service bindings, RPC, entrypoint, DO за биндингом
 ```
 
 Образы (`engine/Dockerfile`, контекст сборки — корень репозитория):
@@ -114,7 +118,41 @@ new_sqlite_classes = ["Counter"]
 
 При **деплое новой версии** воркера соединения рвутся (код `1006`), как и у Cloudflare, а данные объекта остаются. **Переподключаться должен клиент.** Браузерный `WebSocket` этого не умеет, обычно используют библиотеку вроде `partysocket` или `reconnecting-websocket`. Объекту стоит при подключении сразу отдавать текущее состояние.
 
-Отличия от Cloudflare: id объекта — это hex от имени, а не 64-символьный хэш. Вызовы через stub проксируются, поэтому аргументы и результаты должны быть сериализуемыми (как у RPC). Цепочки вида `stub.a.b()` не поддерживаются.
+Отличия от Cloudflare: вызовы через stub проксируются, поэтому аргументы и результаты должны быть сериализуемыми (как у RPC). Цепочки вида `stub.a.b()` не поддерживаются. id объекта, как и в Cloudflare, — 64 hex (SHA-256 от имени).
+
+## Service bindings
+
+Один воркер вызывает другой внутри платформы — без сети и без публичного адреса у цели. Так большой воркер делится на несколько, а один из них становится **API gateway**: единый вход с авторизацией, CORS и маршрутизацией, остальные закрыты. Пример — `examples/services/`.
+
+```toml
+# gateway/wrangler.toml
+[[services]]
+binding = "BACKEND"
+service = "example-backend"
+
+[[services]]
+binding = "ADMIN"
+service = "example-backend"
+entrypoint = "Admin"          # именованный класс WorkerEntrypoint
+
+# backend/wrangler.toml
+workers_dev = false           # адреса <имя>.<домен> нет, только вызовы из других воркеров
+```
+
+```ts
+await env.BACKEND.fetch(request);   // HTTP, как запрос по адресу воркера (включая статику)
+await env.BACKEND.add(2, 3);        // RPC: у цели export default class extends WorkerEntrypoint
+await env.ADMIN.stats("demo");      // RPC к именованному entrypoint
+```
+
+- Вызов всегда идёт в **активную версию** цели (кэш 1 с): после деплоя или отката вызываемого воркера вызывающие переходят на неё сами.
+- Воркеры деплоятся в **любом порядке**. Если цели нет, вызов бросает `service binding A → B: воркер B не найден`.
+- Связь **односторонняя**: воркер видит только те воркеры, что указаны в его `[[services]]`.
+- Логи вызываемого воркера (`console.*`, RPC, исключения) идут в **его** `wravler tail`.
+
+Как устроено (`workers/gateway/src/services.ts`): вызывающий получает служебный биндинг `ServiceBinding` с props `{service, entrypoint}`, прослойка превращает его в `env.BACKEND` (JS `Proxy`: `fetch` — HTTP, остальные методы — RPC). В целевом воркере вызов принимает `__PlatformEntry` из прослойки: создаёт нужный entrypoint с обёрнутым `env` (DO, другие service bindings) и вызывает метод.
+
+Отличия от Cloudflare: аргументы и результаты RPC должны быть сериализуемыми. Чтение свойств через RPC (`await env.X.someProp`) и `connect()` не поддерживаются. Методы с именами на `__` недоступны.
 
 ## Секреты
 
@@ -158,9 +196,9 @@ not_found_handling = "404-page"         # или "single-page-application"
 
 `https://panel.<ROOT_DOMAIN>` (у нас `panel.workers.ava-kk.ru`) — React-приложение из `panel/`. Структура экранов повторяет дашборд Cloudflare для воркеров:
 
-- **Список воркеров:** поиск, сортировка, значки «Durable Objects», «Статика», «Без кода», время последнего деплоя, меню «⋯» (открыть, версии, логи, удалить).
+- **Список воркеров:** поиск, сортировка, значки «Закрытый», «Воркеры», «Durable Objects», «Статика», «Без кода», время последнего деплоя, меню «⋯» (открыть, версии, логи, удалить).
 - **Страница воркера**, вкладки:
-  - **Обзор** — адрес, биндинги (vars, DO, статика), последние версии, сведения (главный модуль, compatibility date и флаги);
+  - **Обзор** — адрес, биндинги (vars, секреты, DO, другие воркеры, статика), последние версии, сведения (главный модуль, compatibility date и флаги);
   - **Версии** — все версии; «Сделать активной» переключает воркер на выбранную версию сразу, без передеплоя (откат);
   - **Логи** — живой tail в браузере (тот же TailHub, что у `wravler tail`): запросы, статусы, `console.*`, исключения; пауза и очистка;
   - **Настройки** — модули кода, параметры статики, удаление с вводом имени.
@@ -180,7 +218,7 @@ wravler tail test                  # console.*, исключения, стату
 wravler tail test --format json    # полные события
 ```
 
-Как это устроено: gateway загружает каждый воркер с `tails: [api]`, workerd отдаёт его события в `api.tail()`. Оттуда они уходят в `TailHub`, это DO по одному на воркер, который держит WebSocket-сессии wrangler. Пока никто не смотрит tail, события отбрасываются. Новая сессия начинает получать события не позже чем через 2 секунды.
+Как это устроено: gateway загружает каждый воркер со своим tail-обработчиком — `TailForwarder` с именем воркера в props (`workers/gateway/src/tail.ts`). Поэтому к нужному воркеру попадают и события без URL: RPC, Durable Objects, вызовы через service binding. Обработчик переводит события в JSON и передаёт в api (`TailIngest`), оттуда они уходят в `TailHub`, это DO по одному на воркер, который держит WebSocket-сессии wrangler. Пока никто не смотрит tail, события отбрасываются. Новая сессия начинает получать события не позже чем через 2 секунды.
 
 Заголовки `authorization`, `cookie`, `set-cookie` и `proxy-authorization` в логах заменяются на `REDACTED`. На WebSocket wrangler токен не присылает, поэтому секретом служит id сессии: его выдаёт только `POST .../tails` по токену.
 

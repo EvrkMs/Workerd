@@ -10,8 +10,11 @@ export interface WorkerSummary {
   hasCode: boolean;
   assetFiles: number;
   durableObjects: number;
+  services: number;
   vars: number;
   secrets: number;
+  /** false — workers_dev = false: адреса нет, только service bindings. */
+  public: boolean;
 }
 
 export interface WorkerDetail extends WorkerSummary {
@@ -22,6 +25,7 @@ export interface WorkerDetail extends WorkerSummary {
   /** Только имена: значения секретов сервер не отдаёт. */
   secretsList: string[];
   durableObjectsList: { binding: string; className: string }[];
+  servicesList: { binding: string; service: string; entrypoint?: string }[];
   assets: {
     files: number;
     binding: string | null;

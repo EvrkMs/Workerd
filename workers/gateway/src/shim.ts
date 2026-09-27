@@ -5,8 +5,14 @@
 //
 // Stub объекта — JS Proxy: stub.method(...args) → RPC call() в платформу,
 // stub.fetch(...) → fetch-обработчик биндинга (так проходит и WebSocket). Сам объект живёт в Host-DO платформы как facet.
+//
+// Service bindings (__SVC_<ИМЯ>) — такой же Proxy. На стороне вызываемого воркера вызов
+// приходит в __PlatformEntry: он создаёт нужный entrypoint (default или именованный)
+// с обёрнутым env и вызывает метод — так env обёрнут и у именованных entrypoint'ов.
 
 export const PLATFORM_MODULE = "__platform.js";
+/** Вход для service bindings (экспорт прослойки). */
+export const PLATFORM_ENTRY = "__PlatformEntry";
 
 export function shimModule(mainModule: string, doClasses: string[]): string {
   const main = JSON.stringify(`./${mainModule}`);
@@ -21,6 +27,7 @@ export class ${cls} extends (user.${cls} ?? missingClass(${JSON.stringify(cls)})
     .join("\n");
 
   return `
+import { WorkerEntrypoint } from "cloudflare:workers";
 import * as user from ${main};
 export * from ${main};
 
@@ -119,6 +126,17 @@ function patchAlarms(ctx, env) {
   storage.deleteAlarm = () => alarms.delete(host);
 }
 
+// env.<ИМЯ> другого воркера: fetch() — HTTP, любой другой метод — RPC
+function serviceStub(raw) {
+  return new Proxy({}, {
+    get(_, prop) {
+      if (typeof prop !== "string" || prop === "then") return undefined; // не thenable
+      if (prop === "fetch") return (input, init) => raw.fetch(input, init);
+      return (...args) => raw.call(prop, args);
+    },
+  });
+}
+
 const wrapped = new WeakMap();
 function wrapEnv(env) {
   if (!env || typeof env !== "object") return env;
@@ -127,10 +145,39 @@ function wrapEnv(env) {
   out = {};
   for (const [key, value] of Object.entries(env)) {
     if (key.startsWith("__DO_")) out[key.slice(5)] = new DurableObjectNamespace(value);
+    else if (key.startsWith("__SVC_")) out[key.slice(6)] = serviceStub(value);
     else if (key !== "__ALARMS") out[key] = value;
   }
   wrapped.set(env, out);
   return out;
+}
+
+// Вход для service bindings: props.entrypoint — имя класса WorkerEntrypoint или null (default)
+const FORBIDDEN = new Set(["constructor", "fetch", "connect", "tail", "trace", "scheduled", "queue", "email", "test", "alarm"]);
+export class ${PLATFORM_ENTRY} extends WorkerEntrypoint {
+  #target() {
+    const name = this.ctx.props?.entrypoint ?? null;
+    const exported = name === null ? user.default : user[name];
+    if (typeof exported === "function") return { instance: new exported(this.ctx, wrapEnv(this.env)), handler: false };
+    if (name === null && exported && typeof exported === "object") return { instance: exported, handler: true };
+    throw new Error(name === null
+      ? "у воркера нет default-экспорта"
+      : "entrypoint " + name + " не экспортирован из главного модуля");
+  }
+  fetch(request) {
+    const { instance, handler } = this.#target();
+    if (typeof instance.fetch !== "function") throw new Error("у entrypoint нет fetch()");
+    return handler ? instance.fetch(request, wrapEnv(this.env), this.ctx) : instance.fetch(request);
+  }
+  call(method, args) {
+    const { instance, handler } = this.#target();
+    if (handler) throw new Error("RPC доступен только у класса WorkerEntrypoint (export default class extends WorkerEntrypoint)");
+    if (typeof method !== "string" || method.startsWith("__") || FORBIDDEN.has(method) || method in Object.prototype
+        || typeof instance[method] !== "function") {
+      throw new TypeError("метод " + method + " не найден у entrypoint");
+    }
+    return instance[method](...args);
+  }
 }
 
 const original = user.default;
