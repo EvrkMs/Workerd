@@ -1,0 +1,14 @@
+{
+  "name": "controller",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --format=esm --target=es2024 --external:cloudflare:* --outfile=dist/index.js"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260926.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

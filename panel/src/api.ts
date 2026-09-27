@@ -26,6 +26,8 @@ export interface WorkerDetail extends WorkerSummary {
   secretsList: string[];
   durableObjectsList: { binding: string; className: string }[];
   servicesList: { binding: string; service: string; entrypoint?: string }[];
+  /** Контейнер воркера worker-<имя>; null — нет (воркер без кода или ещё не запускался). */
+  runner: { version: number; state: string; status: string } | null;
   assets: {
     files: number;
     binding: string | null;

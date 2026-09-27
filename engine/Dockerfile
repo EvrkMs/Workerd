@@ -1,8 +1,12 @@
 # Образы платформы. Контекст сборки — корень репозитория (см. .dockerignore).
 #
 #   engine   — чистый движок: только бинарник workerd, без кода и конфига
-#   platform — engine + config/config.capnp + собранные workers/gateway, workers/api и panel
-#   egress   — engine + config/egress.capnp (без JS: выход в интернет, только публичные адреса)
+#   platform   — engine + config/config.capnp + собранные workers/gateway, workers/api и panel
+#   controller — engine + config/controller.capnp + workers/controller (управляет контейнерами
+#                воркеров через Docker). Этот же образ — образ контейнеров воркеров
+#                worker-<имя>: контроллер кладёт их конфиг и код в /app/runner и запускает
+#                `workerd serve /app/runner/config.capnp`
+#   egress     — engine + config/egress.capnp (без JS: выход в интернет, только публичные адреса)
 #
 # Пользовательские воркеры в образы не входят: они деплоятся через wravler в реестр (/data).
 
@@ -40,9 +44,10 @@ WORKDIR /src/workers
 # сначала только зависимости — слой кэшируется, пока не менялись package*.json
 COPY workers/api/package.json workers/api/package-lock.json api/
 COPY workers/gateway/package.json workers/gateway/package-lock.json gateway/
-RUN (cd api && npm ci --no-audit --no-fund) && (cd gateway && npm ci --no-audit --no-fund)
+COPY workers/controller/package.json workers/controller/package-lock.json controller/
+RUN for w in api gateway controller; do (cd "$w" && npm ci --no-audit --no-fund) || exit 1; done
 COPY workers/ ./
-RUN for w in api gateway; do (cd "$w" && npm run typecheck && npm run build) || exit 1; done
+RUN for w in api gateway controller; do (cd "$w" && npm run typecheck && npm run build) || exit 1; done
 
 # --- веб-панель (React + Vite) ---------------------------------------------------------
 FROM ${REGISTRY}/node:24-slim AS panel
@@ -58,6 +63,10 @@ COPY --from=build /src/workers/gateway/dist/ /app/gateway/
 COPY --from=build /src/workers/api/dist/ /app/api/
 # раздаёт api-воркер на panel.<ROOT_DOMAIN> (disk-сервис panel-ui в config.capnp)
 COPY --from=panel /src/panel/dist/ /app/panel/
+
+FROM engine AS controller
+COPY config/controller.capnp /app/config.capnp
+COPY --from=build /src/workers/controller/dist/ /app/controller/
 
 FROM engine AS egress
 COPY config/egress.capnp /app/config.capnp

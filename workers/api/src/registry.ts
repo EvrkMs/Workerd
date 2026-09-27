@@ -103,13 +103,14 @@ export interface WorkerDetail extends WorkerSummary {
   modules: { name: string; type: ModuleType; size: number }[];
 }
 
-/** Код версии в формате Worker Loader (только сериализуемые через RPC типы). */
-export interface VersionCode {
+/** Всё, из чего собирается контейнер воркера (runner/bundle.ts). */
+export interface RunnerSource {
   compatibilityDate: string;
   compatibilityFlags: string[];
   mainModule: string;
-  modules: Record<string, { js: string } | { cjs: string } | { text: string } | { json: unknown } | { data: ArrayBuffer } | { wasm: ArrayBuffer }>;
-  env: Record<string, unknown>;
+  modules: UploadedModule[];
+  vars: Record<string, unknown>;
+  secrets: Record<string, string>;
   durableObjects: DurableObjectBinding[];
   services: ServiceBinding[];
   /** Имя биндинга статики (env.ASSETS), если он объявлен. */
@@ -212,6 +213,10 @@ export class Registry extends DurableObject<object> {
       const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(workers)").toArray();
       if (!columns.some((c) => c.name === "public")) {
         this.sql.exec("ALTER TABLE workers ADD COLUMN public INTEGER NOT NULL DEFAULT 1");
+      }
+      // IP контейнера воркера (ставит оркестратор, когда контейнер ответил)
+      if (!columns.some((c) => c.name === "runner_addr")) {
+        this.sql.exec("ALTER TABLE workers ADD COLUMN runner_addr TEXT");
       }
     });
   }
@@ -329,12 +334,32 @@ export class Registry extends DurableObject<object> {
     return row?.active_version ?? null;
   }
 
-  /** Для gateway: активная версия и открыт ли адрес <имя>.<домен>; null — воркера нет. */
-  route(name: string): { version: number; public: boolean } | null {
+  /**
+   * Для gateway: активная версия, открыт ли адрес <имя>.<домен> и IP контейнера
+   * (null — контейнер ещё не запущен); null — воркера нет.
+   */
+  route(name: string): { version: number; public: boolean; address: string | null } | null {
     const row = this.sql
-      .exec<{ active_version: number; public: number }>("SELECT active_version, public FROM workers WHERE name = ?", name)
+      .exec<{ active_version: number; public: number; runner_addr: string | null }>(
+        "SELECT active_version, public, runner_addr FROM workers WHERE name = ?",
+        name,
+      )
       .toArray()[0];
-    return row ? { version: row.active_version, public: row.public !== 0 } : null;
+    return row ? { version: row.active_version, public: row.public !== 0, address: row.runner_addr } : null;
+  }
+
+  setRunnerAddress(name: string, address: string | null): void {
+    this.sql.exec("UPDATE workers SET runner_addr = ? WHERE name = ?", address, name);
+  }
+
+  /**
+   * Service binding caller → target: IP контейнера цели, если у активной версии caller
+   * есть биндинг на target. null — биндинга нет или цель не запущена.
+   */
+  serviceTarget(caller: string, target: string): { allowed: boolean; address: string | null } {
+    const services = this.activeMeta(caller)?.services ?? [];
+    if (!services.some((s) => s.service === target)) return { allowed: false, address: null };
+    return { allowed: true, address: this.route(target)?.address ?? null };
   }
 
   /** workers_dev в wrangler.toml (wrangler шлёт после каждого деплоя). false — воркер только для биндингов. */
@@ -342,39 +367,45 @@ export class Registry extends DurableObject<object> {
     return this.sql.exec("UPDATE workers SET public = ? WHERE name = ?", enabled ? 1 : 0, name).rowsWritten > 0;
   }
 
-  code(version: number): VersionCode {
+  runnerSource(version: number): RunnerSource {
     const row = this.sql
       .exec<{ meta: string }>("SELECT meta FROM versions WHERE id = ?", version)
       .toArray()[0];
     if (!row) throw new Error(`version ${version} not found`);
     const meta = JSON.parse(row.meta) as WorkerMeta;
-
-    const decoder = new TextDecoder();
-    const modules: VersionCode["modules"] = {};
-    for (const m of this.sql.exec<{ name: string; type: ModuleType; content: ArrayBuffer }>(
-      "SELECT name, type, content FROM modules WHERE version_id = ?",
-      version,
-    )) {
-      switch (m.type) {
-        case "js": modules[m.name] = { js: decoder.decode(m.content) }; break;
-        case "cjs": modules[m.name] = { cjs: decoder.decode(m.content) }; break;
-        case "text": modules[m.name] = { text: decoder.decode(m.content) }; break;
-        case "json": modules[m.name] = { json: JSON.parse(decoder.decode(m.content)) }; break;
-        case "data": modules[m.name] = { data: m.content }; break;
-        case "wasm": modules[m.name] = { wasm: m.content }; break;
-      }
-    }
-
+    const modules = this.sql
+      .exec<{ name: string; type: ModuleType; content: ArrayBuffer }>(
+        "SELECT name, type, content FROM modules WHERE version_id = ? ORDER BY name",
+        version,
+      )
+      .toArray()
+      // главный модуль прослойка импортирует по имени; порядок остальных не важен
+      .map((m) => ({ name: m.name, type: m.type, content: m.content }));
     return {
       compatibilityDate: meta.compatibilityDate,
       compatibilityFlags: meta.compatibilityFlags,
       mainModule: meta.mainModule,
       modules,
-      env: { ...meta.vars, ...meta.secrets },
+      vars: meta.vars,
+      secrets: meta.secrets ?? {},
       durableObjects: meta.durableObjects ?? [],
       services: meta.services ?? [],
       assetsBinding: meta.assets?.binding ?? null,
     };
+  }
+
+  /** Все воркеры с активной версией — для сверки контейнеров (orchestrator). */
+  activeVersions(): { name: string; version: number; hasCode: boolean }[] {
+    return this.sql
+      .exec<{ name: string; active_version: number; meta: string }>(
+        "SELECT w.name, w.active_version, v.meta FROM workers w JOIN versions v ON v.id = w.active_version",
+      )
+      .toArray()
+      .map((r) => ({
+        name: r.name,
+        version: r.active_version,
+        hasCode: (JSON.parse(r.meta) as WorkerMeta).mainModule !== "",
+      }));
   }
 
   info(version: number): VersionInfo {

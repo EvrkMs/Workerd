@@ -7,6 +7,7 @@
 // Вход по токену платформы (тот же, что у wravler). Cookie — HttpOnly, Secure,
 // SameSite=Strict; изменяющие запросы дополнительно требуют заголовок X-Panel,
 // который чужая страница без CORS отправить не может.
+import { orchestrator, type Orchestrator, type RunnerState } from "./orchestrator";
 import type { Registry } from "./registry";
 import type { TailHub } from "./tail";
 
@@ -15,6 +16,7 @@ interface PanelEnv {
   ROOT_DOMAIN: string;
   REGISTRY: DurableObjectNamespace<Registry>;
   TAILS: DurableObjectNamespace<TailHub>;
+  ORCHESTRATOR: DurableObjectNamespace<Orchestrator>;
   PANEL_UI: Fetcher;
 }
 
@@ -83,27 +85,39 @@ async function handleApi(request: Request, url: URL, env: PanelEnv): Promise<Res
 
   if (method === "GET" && sub === "") {
     const detail = await registry.detail(name);
-    return detail ? json(detail) : json({ error: "Воркер не найден" }, 404);
+    if (!detail) return json({ error: "Воркер не найден" }, 404);
+    // состояние контейнера воркера (у воркера без кода его нет)
+    let runner: RunnerState | null = null;
+    try {
+      runner = (await orchestrator(env).runners()).find((r) => r.name === name) ?? null;
+    } catch {
+      // контроллер недоступен — панель всё равно показывает воркер
+    }
+    return json({ ...detail, runner });
   }
   if (method === "DELETE" && sub === "") {
-    return (await registry.remove(name)) ? json({ ok: true }) : json({ error: "Воркер не найден" }, 404);
+    const existed = await registry.remove(name);
+    await orchestrator(env).remove(name);
+    return existed ? json({ ok: true }) : json({ error: "Воркер не найден" }, 404);
   }
   if (method === "GET" && sub === "/versions") {
     return json(await registry.versionsOf(name));
   }
   if (method === "POST" && sub === "/rollback") {
     const body = (await request.json().catch(() => ({}))) as { version?: number };
+    const previous = await registry.activeVersion(name);
     const ok = typeof body.version === "number" && (await registry.setActive(name, body.version));
-    return ok ? json({ ok: true }) : json({ error: "Версия не найдена" }, 404);
+    if (!ok) return json({ error: "Версия не найдена" }, 404);
+    return activated(env, name, previous, { ok: true });
   }
   if (method === "POST" && sub === "/secrets") {
     const body = (await request.json().catch(() => ({}))) as { name?: string; value?: string };
     if (!body.name || typeof body.value !== "string") return json({ error: "нужны имя и значение" }, 400);
-    return changeSecrets(registry, name, { [body.name]: body.value });
+    return changeSecrets(env, registry, name, { [body.name]: body.value });
   }
   if (method === "DELETE" && sub === "/secrets") {
     const key = url.searchParams.get("name") ?? "";
-    return changeSecrets(registry, name, { [key]: null });
+    return changeSecrets(env, registry, name, { [key]: null });
   }
   if (method === "POST" && sub === "/tail") {
     if ((await registry.activeVersion(name)) === null) return json({ error: "Воркер не найден" }, 404);
@@ -119,14 +133,23 @@ async function handleApi(request: Request, url: URL, env: PanelEnv): Promise<Res
   return json({ error: "not found" }, 404);
 }
 
+/** Активная версия сменилась — запустить её; не запустилась — ошибка с логом workerd. */
+async function activated(env: PanelEnv, name: string, previous: number | null, body: unknown): Promise<Response> {
+  const result = await orchestrator(env).activate(name, previous);
+  return result.ok ? json(body) : json({ error: result.error }, 400);
+}
+
 async function changeSecrets(
+  env: PanelEnv,
   registry: DurableObjectStub<Registry>,
   name: string,
   changes: Record<string, string | null>,
 ): Promise<Response> {
   try {
+    const previous = await registry.activeVersion(name);
     const version = await registry.changeSecrets(name, changes);
-    return version === null ? json({ error: "Воркер не найден" }, 404) : json({ ok: true, version });
+    if (version === null) return json({ error: "Воркер не найден" }, 404);
+    return activated(env, name, previous, { ok: true, version });
   } catch (e) {
     return json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }

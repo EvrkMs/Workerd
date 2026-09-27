@@ -107,6 +107,17 @@ function Overview({ worker: w, versions, url }: { worker: WorkerDetail; versions
               <dd><TimeAgo iso={w.createdAt} /></dd>
               <dt>Код</dt>
               <dd>{w.hasCode ? <code>{w.mainModule}</code> : <span className="muted">нет, только статика</span>}</dd>
+              {w.hasCode && (
+                <>
+                  <dt>Процесс</dt>
+                  <dd>
+                    {w.runner
+                      ? <><Badge tone={w.runner.state === "running" ? "green" : "amber"}>{w.runner.state}</Badge>
+                          <span className="muted"> v{w.runner.version} · {w.runner.status}</span></>
+                      : <span className="muted">не запущен (запустится при первом запросе)</span>}
+                  </dd>
+                </>
+              )}
               <dt>Совместимость</dt>
               <dd><code>{w.compatibilityDate}</code></dd>
               {w.compatibilityFlags.length > 0 && (

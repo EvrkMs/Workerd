@@ -14,7 +14,6 @@ services:
       target: platform
     image: workerd-platform:local
     restart: unless-stopped
-    command: ["--experimental"]  # Worker Loader пока экспериментальный
     environment:
       # Токен API для wravler — из deploy/.env. Без него compose откажется запускаться,
       # а не поднимет платформу с закрытым API.
@@ -24,9 +23,14 @@ services:
     # Только internal-сеть: шлюза нет, до хоста/LAN/соседей/интернета маршрута нет.
     # В ней же caddy-server (вход) и egress (выход). Порты на хост не публикуем.
     volumes:
-      - workerd_data:/data  # реестр воркеров и данные Durable Objects
+      - workerd_data:/data  # реестр, статика, данные Durable Objects воркеров (workers/<имя>)
     networks:
-      - workerd_internal
+      workerd_internal:      # Caddy, egress, контейнеры воркеров
+        # Постоянный адрес: контейнеры воркеров держат соединения с платформой (tail,
+        # статика, service bindings). Пересозданная платформа на том же IP сразу сбрасывает
+        # старые соединения (RST), а на новом IP они висели бы до таймаута.
+        ipv4_address: "${PLATFORM_IP:-10.0.3.250}"
+      control:               # контроллер
     labels:
       # caddy-docker-proxy. Wildcard выдаётся через DNS-01 — это уже настроено
       # глобально в Caddy (acme_dns cloudflare {env.CF_API_TOKEN}), свой tls-блок
@@ -34,6 +38,28 @@ services:
       # DNS: нужны записи <ROOT_DOMAIN> и *.<ROOT_DOMAIN> на Caddy
       caddy: "${ROOT_DOMAIN}, *.${ROOT_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 8080}}"
+
+  # Контроллер контейнеров воркеров worker-<имя> (workers/controller). Единственный с
+  # доступом к Docker, поэтому живёт только в сети control — кроме него там лишь платформа.
+  controller:
+    build:
+      <<: *build
+      target: controller
+    image: workerd-controller:local
+    restart: unless-stopped
+    user: "0:0"  # сокет Docker: root:docker
+    environment:
+      WRAVLER_TOKEN: "${WRAVLER_TOKEN:?нет WRAVLER_TOKEN в deploy/.env}"
+      # контейнеры воркеров запускаются из этого же образа (engine + workerd)
+      RUNNER_IMAGE: workerd-controller:local
+      DATA_VOLUME: workerd_workerd_data
+      RUNNER_NETWORK: workerd_internal
+      RUNNER_MEMORY_MB: ${RUNNER_MEMORY_MB:-256}
+      RUNNER_CPUS: ${RUNNER_CPUS:-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - control
 
   # Выход в интернет: движок без JS, только публичные адреса (config/egress.capnp)
   egress:
@@ -62,6 +88,7 @@ services:
 
 volumes:
   workerd_data:
+    name: workerd_workerd_data  # имя явно: контроллер монтирует его в контейнеры воркеров
   workerd_backups:
 
 networks:
@@ -70,3 +97,6 @@ networks:
     name: workerd_internal
   # Обычная сеть с выходом наружу — только для egress
   egress:
+  # Платформа ↔ контроллер, без выхода наружу
+  control:
+    internal: true

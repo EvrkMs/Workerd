@@ -5,15 +5,9 @@
 //   html_handling (кроме "none"): /about → /about.html или /about/index.html; /dir/ → /dir/index.html
 //   not_found_handling: "404-page" → /404.html со статусом 404,
 //                       "single-page-application" → /index.html со статусом 200
-import { WorkerEntrypoint } from "cloudflare:workers";
 import type { AssetConfig, AssetFile, VersionInfo } from "../../api/src/registry";
-import type { Env } from "./loader";
-import { registry } from "./loader";
-
-export interface AssetsProps {
-  worker: string;
-  version: number;
-}
+import type { Env } from "./env";
+import { registry } from "./env";
 
 // Информация о версии не меняется (новая версия — новый номер), кэшируем навсегда
 const infos = new Map<string, Promise<VersionInfo>>();
@@ -84,14 +78,4 @@ export async function serveAsset(
     return respond(env, request, assets.files["/404.html"], 404);
   }
   return new Response("not found", { status: 404 });
-}
-
-/** env.ASSETS у кода воркера: env.ASSETS.fetch(request) → статика этой же версии. */
-export class AssetsBinding extends WorkerEntrypoint<Env, AssetsProps> {
-  async fetch(request: Request): Promise<Response> {
-    const { worker, version } = this.ctx.props;
-    const info = await versionInfo(this.env, worker, version);
-    if (!info.assets) return new Response("not found", { status: 404 });
-    return (await serveAsset(this.env, request, info.assets, false))!;
-  }
 }

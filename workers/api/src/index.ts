@@ -10,18 +10,31 @@ import { TailHub } from "./tail";
 import { handlePanel } from "./panel";
 import { RESERVED_NAMES, isValidWorkerName } from "./names";
 import { buckets, handleAssetUpload, parseManifest, parseSessionToken, sessionToken } from "./assets";
+import { Orchestrator, orchestrator, type OrchestratorEnv } from "./orchestrator";
 
-export { Registry, TailHub };
+export { Orchestrator, Registry, TailHub };
 
-interface Env {
-  API_TOKEN?: string;
+export interface Env extends OrchestratorEnv {
   ROOT_DOMAIN: string;
-  REGISTRY: DurableObjectNamespace<Registry>;
   TAILS: DurableObjectNamespace<TailHub>;
-  /** /data на запись: сюда кладутся файлы статики (assets/<hh>/<hash>) */
-  STORAGE: Fetcher;
+  ORCHESTRATOR: DurableObjectNamespace<Orchestrator>;
   /** Собранная панель (panel/dist в образе, /app/panel) */
   PANEL_UI: Fetcher;
+}
+
+/**
+ * Код ошибки «версия не запустилась». Не 10021: на него wrangler (при слове «startup»
+ * в тексте) подменяет сообщение своим про лимиты старта Cloudflare.
+ */
+const START_FAILED = 10070;
+
+/**
+ * Активная версия воркера сменилась — запустить её в контейнере. Не запустилась:
+ * оркестратор вернул прежнюю, а wrangler/панель получают ошибку с логом workerd.
+ */
+export async function activate(env: Env, name: string, previous: number | null): Promise<string | null> {
+  const result = await orchestrator(env).activate(name, previous);
+  return result.ok ? null : result.error;
 }
 
 function tailHub(env: Env, name: string) {
@@ -57,8 +70,11 @@ async function changeSecrets(
   result: () => unknown,
 ): Promise<Response> {
   try {
+    const previous = await registry(env).activeVersion(name);
     const version = await registry(env).changeSecrets(name, changes);
-    return version === null ? fail(404, 10007, `воркер ${name} не найден`) : ok(result());
+    if (version === null) return fail(404, 10007, `воркер ${name} не найден`);
+    const error = await activate(env, name, previous);
+    return error ? fail(400, START_FAILED, error) : ok(result());
   } catch (e) {
     return fail(400, 10021, e instanceof Error ? e.message : String(e));
   }
@@ -265,9 +281,12 @@ export default {
  * Objects, вызовы через service binding) тоже попадают к нужному воркеру.
  */
 export class TailIngest extends WorkerEntrypoint<Env> {
-  async publish(worker: string, messages: string[]): Promise<void> {
-    if (!isValidWorkerName(worker) || !messages.length) return;
-    if (await hasListeners(this.env, worker)) await tailHub(this.env, worker).publish(messages);
+  /** Возвращает, смотрит ли кто-нибудь tail воркера (нет — контейнер перестаёт слать события). */
+  async publish(worker: string, messages: string[]): Promise<boolean> {
+    if (!isValidWorkerName(worker)) return false;
+    if (!(await hasListeners(this.env, worker))) return false;
+    if (messages.length) await tailHub(this.env, worker).publish(messages);
+    return true;
   }
 }
 
@@ -347,12 +366,15 @@ async function route(request: Request, env: Env): Promise<Response> {
     const parsed = await parseUpload(request, name, env);
     if ("error" in parsed) return fail(400, 10021, parsed.error);
     let version: number;
+    const previous = await registry(env).activeVersion(name);
     try {
       version = await registry(env).deploy(name, parsed.meta, parsed.modules);
     } catch (e) {
       return fail(400, 10021, e instanceof Error ? e.message : String(e));
     }
     if (parsed.assetSession) await registry(env).endAssetSession(parsed.assetSession);
+    const error = await activate(env, name, previous);
+    if (error) return fail(400, START_FAILED, error);
     // wrangler показывает deployment_id как UUID без дефисов → кодируем в него номер версии
     const deploymentId = version.toString(16).padStart(32, "0");
     return ok({ id: name, etag: deploymentId, deployment_id: deploymentId, has_modules: true });
@@ -361,6 +383,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Удаление: wrangler delete шлёт DELETE /services/:name
   if (method === "DELETE" && sub === "" && (rest.startsWith("services/") || rest.startsWith("scripts/"))) {
     const existed = await registry(env).remove(name);
+    await orchestrator(env).remove(name);
     return existed ? ok({ id: name }) : fail(404, 10007, `воркер ${name} не найден`);
   }
 
